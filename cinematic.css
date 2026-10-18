@@ -1,0 +1,102 @@
+/* =========================================================
+   FIREFLY CAFÉ — cinematic.css (homepage only)
+   Loaded after style.css. Reuses its tokens (--espresso, --amber, ...).
+
+   Two modes:
+   1. Default (no JS / reduced motion / GSAP failed): every scene is a plain
+      stacked block — image, then text. Fully readable, nothing hidden.
+   2. html.cine-on (added by cinematic.js): scenes become full-viewport
+      stages whose layers are driven by scroll.
+   ========================================================= */
+
+html, body { overflow-x: clip; }
+
+/* ---------- Hero ---------- */
+.hero { overflow: hidden; }
+.hero .media {
+  background: var(--chocolate) url("images/gallery/interior-1.jpg") center / cover no-repeat; /* poster / failure fallback */
+  will-change: transform;
+}
+.hero-content { will-change: transform, opacity; }
+.hero h1 { max-width: 15ch; }
+
+/* ---------- Shared scene base (static mode) ---------- */
+.scene { position: relative; background: var(--espresso); overflow: hidden; }
+.scene-stage { position: relative; }
+.scene .layer { position: relative; margin: 0; height: 60svh; overflow: hidden; background: var(--chocolate); }
+.scene .layer img { width: 100%; height: 100%; object-fit: cover; }
+.scene .steps { padding: 36px 24px 56px; max-width: var(--maxw); margin: 0 auto; }
+.scene .step { margin-bottom: 36px; max-width: 620px; }
+.scene .step h2 { font-size: clamp(2rem, 5vw, 3.6rem); margin: 10px 0 14px; }
+.scene .step p { color: var(--ivory); font-size: clamp(1rem, 1.5vw, 1.2rem); }
+.scene .step-actions { margin-top: 26px; display: flex; flex-wrap: wrap; gap: 14px; }
+.scene .step .eyebrow { display: block; }
+
+/* Elements that only make sense in the cinematic composition */
+.scene .food-bg,
+.scene .people-side,
+.scene-drinks .strip { display: none; }
+.scene-drinks .strip { display: block; }
+.scene-drinks .panel { margin: 0; height: 60svh; overflow: hidden; background: var(--chocolate); }
+.scene-drinks .panel img { width: 100%; height: 100%; object-fit: cover; }
+
+/* ---------- Cinematic mode ---------- */
+html.cine-on .scene-stage { height: 100svh; min-height: 520px; overflow: hidden; perspective: 1400px; background: var(--espresso); }
+html.cine-on .scene .layer { position: absolute; inset: 0; height: auto; }
+html.cine-on .scene .layer img { will-change: transform; backface-visibility: hidden; }
+html.cine-on .scene-stage::after {
+  content: ""; position: absolute; inset: 0; z-index: 4; pointer-events: none;
+  background:
+    linear-gradient(to top, rgba(8,5,4,.92) 0%, rgba(8,5,4,.55) 28%, rgba(8,5,4,0) 62%),
+    linear-gradient(to bottom, rgba(8,5,4,.55) 0%, rgba(8,5,4,0) 22%);
+}
+html.cine-on .scene .steps {
+  position: absolute; z-index: 5; left: 0; right: 0; bottom: clamp(36px, 9vh, 96px);
+  height: 0; padding: 0; margin: 0 auto; max-width: var(--maxw);
+}
+html.cine-on .scene .step { position: absolute; left: 24px; right: 24px; bottom: 0; margin: 0; }
+html.cine-on .scene .step h2 { margin-bottom: 12px; }
+
+/* Food: sharp framed dish over a soft, deeper background copy of itself */
+html.cine-on .scene .food-bg { display: block; }
+html.cine-on .food-bg img { filter: blur(22px) brightness(.45) saturate(1.1); }
+html.cine-on .food-frame { will-change: clip-path; }
+
+/* Drinks: desktop = horizontal pan; mobile = crossfade */
+html.cine-on .scene-drinks .strip { position: absolute; inset: 0; }
+html.cine-on .scene-drinks .panel { position: absolute; inset: 0; height: auto; }
+html.cine-on .scene-drinks .panel img { transform: scale(1.12); }
+
+/* People: pull-back reveal */
+html.cine-on .scene-people .layer.people-main { will-change: clip-path; }
+
+@media (min-width: 900px) {
+  html.cine-on .scene .steps { padding: 0 24px; }
+  html.cine-on .scene .step { left: 24px; right: auto; max-width: 560px; }
+
+  html.cine-on .scene-drinks .strip { display: flex; gap: 4vw; padding: 0 10vw; width: max-content; will-change: transform; }
+  html.cine-on .scene-drinks .panel { position: relative; inset: auto; flex: 0 0 62vw; height: 72svh; align-self: center; border-radius: var(--radius-lg); box-shadow: 0 30px 60px -20px var(--shadow); }
+
+  html.cine-on .scene .people-side { display: block; position: absolute; inset: auto; top: 8%; bottom: 26%; width: 22%; border-radius: var(--radius-md); }
+  html.cine-on .people-side.left { left: 3%; }
+  html.cine-on .people-side.right { right: 3%; }
+  html.cine-on .scene-people .step { left: 0; right: 0; margin: 0 auto; text-align: center; max-width: 640px; }
+  html.cine-on .scene-people .step-actions { justify-content: center; }
+  html.cine-on .scene-people .steps { max-width: none; }
+}
+
+/* ---------- Finale ---------- */
+.scene-finale { isolation: isolate; text-align: center; padding: clamp(96px, 16vw, 200px) 0; }
+.finale-bg { position: absolute; inset: 0; z-index: -1; overflow: hidden; background: var(--chocolate); }
+.finale-bg::after { content: ""; position: absolute; inset: 0; background: radial-gradient(ellipse at center, rgba(8,5,4,.55), rgba(8,5,4,.9)); }
+.finale-bg img { width: 100%; height: 100%; object-fit: cover; will-change: transform; }
+.finale-content h2 { font-size: clamp(2.2rem, 6vw, 4.2rem); margin: 12px auto 18px; max-width: 16ch; }
+.finale-content p { margin: 0 auto; color: var(--ivory); font-size: 1.1rem; }
+.finale-content .step-actions { margin-top: 34px; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+
+/* About image gets a gentle parallax inside its existing frame */
+[data-parallax] { will-change: transform; }
+
+@media (max-width: 480px) {
+  .scene .step-actions .btn, .finale-content .btn { width: 100%; justify-content: center; }
+}

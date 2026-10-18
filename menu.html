@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Full Menu — Firefly Café</title>
+<meta name="description" content="The full Firefly Café menu — coffee, smoothies, drinks, small bites, main meals, platters and desserts. Awka's favorite chill spot." />
+<link rel="canonical" href="https://www.fireflycafe.ng/menu.html" />
+
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Full Menu — Firefly Café" />
+<meta property="og:description" content="Coffee, smoothies, drinks, small bites, main meals, platters and desserts at Firefly Café, Awka." />
+<meta property="og:url" content="https://www.fireflycafe.ng/menu.html" />
+<meta property="og:site_name" content="Firefly Café" />
+<meta property="og:image" content="https://www.fireflycafe.ng/images/platter.jpg" />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Full Menu — Firefly Café" />
+<meta name="twitter:description" content="Coffee, smoothies, drinks, small bites, main meals, platters and desserts." />
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪔</text></svg>" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="style.css" />
+
+</head>
+<body class="bg-espresso">
+
+<header class="site-header is-scrolled">
+  <div class="container nav-row">
+    <a href="index.html" class="brand"><img src="images/firefly-logo.jpg" alt="Firefly Café" class="brand-logo"></a>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html#hero">Home</a>
+      <a href="menu.html" class="is-active">Menu</a>
+      <a href="index.html#about">About</a>
+      <a href="index.html#gallery">Gallery</a>
+      <a href="index.html#find-us">Contact</a>
+      <a href="index.html#reservation" class="btn btn-primary">Reserve</a>
+    </nav>
+    <button class="hamburger" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<main id="main" class="menu-page-bg">
+  <div class="slideshow-bg" data-slideshow aria-hidden="true"><img src="images/backgrounds/platter.jpg" alt="" loading="lazy"><img src="images/backgrounds/chicken-chips.jpg" alt="" loading="lazy"><img src="images/backgrounds/smoothie.jpg" alt="" loading="lazy"><div class="slideshow-overlay"></div></div>
+  <div class="menu-content content-over-bg">
+    <section class="menu-hero container"><span class="eyebrow">THE FULL MENU</span><h1>Everything at Firefly.</h1><p>Choose what you feel like. Ask us about today’s specials and availability.</p><nav class="menu-jump" id="menu-jump" aria-label="Jump to category"></nav></section>
+
+    <div class="container menu-list" id="menu-list" aria-live="polite"><p class="menu-status">Loading the menu…</p></div>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-grid">
+    <div class="footer-brand">
+      <a href="index.html" class="brand">Firefly <span>Café</span></a>
+      <p>Coffee · Smoothies · Bites<br />Awka's favorite chill spot.</p>
+    </div>
+    <div>
+      <p class="footer-heading">Quick Links</p>
+      <div class="footer-links">
+        <a href="index.html#hero">Home</a>
+        <a href="menu.html">Menu</a>
+        <a href="index.html#about">About</a>
+        <a href="index.html#gallery">Gallery</a>
+        <a href="index.html#find-us">Contact</a>
+      </div>
+    </div>
+    <div>
+      <p class="footer-heading">Connect</p>
+      <div class="footer-links">
+        <a href="#" aria-label="Instagram">Instagram</a>
+        <a href="#" aria-label="TikTok">TikTok</a>
+        <a href="#" data-whatsapp-link>WhatsApp</a>
+      </div>
+    </div>
+  </div>
+  <div class="container footer-bottom">
+    <span>© <span id="footer-year"></span> Firefly Café. All rights reserved.</span>
+    <span>Awka, Anambra, Nigeria</span>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
