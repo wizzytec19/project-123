@@ -206,7 +206,7 @@ function openMenuModal(id=null,categoryId=null){
   const item=id?cache.menu.find(x=>String(x.id)===String(id)):null;
   const cats=cache.categories.map(c=>`<option value="${c.id}" ${String(item?.category_id||categoryId)===String(c.id)?"selected":""}>${esc(c.name)}</option>`).join("");
   openModal(item?"Edit menu item":"Add menu item",`<div class="form-grid">
-    <div class="full-col"><label>Name<input id="mName" value="${esc(item?.name||"")}></label></div>
+    <div class="full-col"><label>Name<input id="mName" value="${esc(item?.name||"")}"></label></div>
     <div><label>Category<select id="mCategory">${cats}</select></label></div><div><label>Price (₦)<input id="mPrice" type="number" min="0" value="${item?.price??""}"></label></div>
     <div class="full-col"><label>Description<textarea id="mDesc">${esc(item?.description||"")}</textarea></label></div><div class="full-col"><label>Photo (optional)<input id="mImage" value="${esc(item?.image_url||"")}" placeholder="images/platter.jpg or https://…"><small class="muted" style="display:block;margin-top:6px;font-size:.68rem">Items with a photo appear in “A Taste of Firefly” on the menu page. Leave empty to keep an item out of it.</small></label></div>
     <div><label>Available<select id="mAvailable"><option value="true" ${item?.available!==false?"selected":""}>Available</option><option value="false" ${item?.available===false?"selected":""}>Sold Out</option></select></label></div>

@@ -22,6 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initMapsLinks();
   initFooterYear();
   initTasteShowcase();
+  initFavorites();
 
   // Background slideshows and the gallery grid are managed from the admin
   // (Gallery page). Wait briefly for them, then fall back to the images
@@ -440,6 +441,34 @@ function initGalleryFilters() {
       });
     });
   });
+}
+
+/* ---------- 10b. Our Favorites (homepage) ----------
+   Shows every menu item marked "Featured" in Admin -> Menu. */
+async function initFavorites() {
+  const grid = document.getElementById("favorites-grid");
+  if (!grid) return;
+  const db = window.supabaseClient;
+  if (!db) { grid.closest("section")?.remove(); return; }
+
+  const { data, error } = await db
+    .from("menu_items")
+    .select("id,name,price,description,image_url")
+    .eq("featured", true)
+    .eq("available", true)
+    .order("display_order", { ascending: true })
+    .limit(12);
+
+  if (error || !data || !data.length) { grid.closest("section")?.remove(); return; }
+
+  grid.innerHTML = data.map((it) => `
+    <a class="food-card" href="menu.html#item-${escHtml(it.id)}">
+      ${it.image_url ? `<figure><img src="${escHtml(it.image_url)}" alt="${escHtml(it.name)}" loading="lazy"></figure>` : ""}
+      <div class="food-card-body">
+        <div class="food-card-top"><h3>${escHtml(it.name)}</h3><span class="food-price">₦${Number(it.price || 0).toLocaleString("en-NG")}</span></div>
+        ${it.description ? `<p>${escHtml(it.description)}</p>` : ""}
+      </div>
+    </a>`).join("");
 }
 
 /* ---------- 10. Footer year ---------- */

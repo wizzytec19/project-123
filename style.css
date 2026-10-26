@@ -728,8 +728,8 @@ section { position: relative; }
 .content-over-bg { position:relative; z-index:2; }
 .image-frame-placeholder { border-radius:var(--radius-lg); overflow:hidden; box-shadow:0 30px 60px -20px var(--shadow); aspect-ratio:4/5; }
 .image-frame-placeholder img { width:100%; height:100%; object-fit:cover; }
-.bg-slideshow-section .feature-card, .bg-slideshow-section .find-us-card, .bg-slideshow-section .reserve-form { background:rgba(18,13,11,.78); backdrop-filter:blur(8px); }
-.bg-slideshow-section .feature-card:hover { background:rgba(18,13,11,.88); }
+.bg-slideshow-section .feature-card, .bg-slideshow-section .find-us-card, .bg-slideshow-section .reserve-form { background:rgba(18,13,11,.42); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); }
+.bg-slideshow-section .feature-card:hover { background:rgba(18,13,11,.55); }
 .gallery-item { background:var(--chocolate); }
 .gallery-item > img { width:100%; height:100%; object-fit:cover; transition:transform .8s var(--ease), filter .6s ease; }
 .gallery-item:hover > img { transform:scale(1.05); filter:brightness(.78); }
@@ -909,12 +909,18 @@ section { position: relative; }
 .hero-center {
   position: relative; z-index: 2;
   margin: 0; display: flex; align-items: center; justify-content: center;
-  transform: translateY(-14vh);
+  transform: translateY(-6vh);
+}
+/* soft light behind the logo so its dark beetle body stays visible over the video */
+.hero-center::before {
+  content: ""; position: absolute; inset: -18%; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(240,227,207,.24), transparent 65%);
 }
 /* beats the global "logo size safety net" (max-height:48px) */
 .hero-center img.hero-logo {
-  width: clamp(100px, 13vw, 170px);
-  height: auto; max-width: 45vw; max-height: 25vh;
+  width: auto;
+  height: clamp(220px, 46vh, 460px);
+  max-width: 80vw; max-height: none;
   object-fit: contain;
   filter: drop-shadow(0 10px 40px rgba(0,0,0,.55));
 }
@@ -977,3 +983,10 @@ section { position: relative; }
   .site-header.is-scrolled { background: rgb(8,5,4); }
   .nav-links { background: rgb(8,5,4); height: calc(100dvh - var(--nav-h)); bottom: auto; z-index: 99; }
 }
+
+/* Lighter overlay on the dark sections so photos read brighter */
+.slideshow-overlay { background: linear-gradient(90deg, rgba(8,5,4,.72), rgba(8,5,4,.5) 52%, rgba(8,5,4,.68)); }
+@media (max-width: 760px) { .slideshow-overlay { background: rgba(8,5,4,.68); } }
+
+/* Live Google map inside the Find Us frame */
+.map-frame iframe { position:absolute; inset:0; width:100%; height:100%; border:0; display:block; }
