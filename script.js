@@ -22,6 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initMapsLinks();
   initFooterYear();
   initTasteShowcase();
+  initFavorites();
 
   // Background slideshows and the gallery grid are managed from the admin.
   // Everything here is safe to run before the data arrives: HTML images show
