@@ -5,6 +5,7 @@ const fmtNaira = n => `₦${Number(n || 0).toLocaleString("en-NG")}`;
 const esc = s => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 const dateOnly = d => d ? new Date(d).toLocaleDateString("en-NG",{day:"numeric",month:"short",year:"numeric"}) : "—";
 const timeOnly = t => t ? String(t).slice(0,5) : "—";
+const localISO = (d=new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
 let db = window.supabaseClient || null;
 let currentUser = null;
@@ -102,7 +103,7 @@ async function renderDashboard(){
   cache.reservations=reservations; cache.orders=orders; cache.menu=menu;
   const todayReservations=reservations.filter(x=>x.reservation_date===todayStr);
   const pending=reservations.filter(x=>x.status==="Pending");
-  const todayOrders=orders.filter(x=>String(x.created_at||"").startsWith(todayStr));
+  const todayOrders=orders.filter(x=>x.created_at&&localISO(new Date(x.created_at))===todayStr);
   const revenue=todayOrders.reduce((s,x)=>s+Number(x.total||0),0);
   const available=menu.filter(x=>x.available!==false).length, sold=menu.filter(x=>x.available===false).length;
   const recent=[...reservations].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,5);
@@ -147,7 +148,7 @@ async function renderReservations(){
 }
 function bindReservationFilters(){ $("#reservationSearch").addEventListener("input",drawReservationTable); $("#reservationFilter").addEventListener("change",drawReservationTable); }
 function drawReservationTable(){
-  const q=($("#reservationSearch")?.value||"").toLowerCase(), filter=$("#reservationFilter")?.value||"All"; const now=new Date(); const today=now.toISOString().slice(0,10);
+  const q=($("#reservationSearch")?.value||"").toLowerCase(), filter=$("#reservationFilter")?.value||"All"; const today=localISO();
   let rows=cache.reservations.filter(x=>`${x.customer_name} ${x.phone}`.toLowerCase().includes(q));
   rows=rows.filter(x=>{
     if(filter==="All")return true;if(filter==="Today")return x.reservation_date===today;if(filter==="Upcoming")return x.reservation_date>=today&&!["Cancelled","No-show"].includes(x.status);if(filter==="Past")return x.reservation_date<today;return x.status===filter;
@@ -163,8 +164,7 @@ function viewReservation(id){
     <div><label>Guests<input value="${esc(x.guests)}" disabled></label></div><div><label>Status<select id="modalStatus"><option ${x.status==="Pending"?"selected":""}>Pending</option><option ${x.status==="Confirmed"?"selected":""}>Confirmed</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option><option ${x.status==="No-show"?"selected":""}>No-show</option></select></label></div>
     <div class="full-col"><label>Internal notes<textarea id="modalNotes">${esc(x.notes||"")}</textarea></label></div>
   </div>`,[
-    {text:"Close",class:"secondary-button",action:closeModal},
-    {text:"Save",class:"primary-button",action:async()=>{await updateReservation(x.id,$("#modalStatus").value,$("#modalNotes").value)}}
+    {text:"Delete",class:"danger-button",action:()=>deleteRow("reservations",x.id,`the reservation for ${x.customer_name}`,()=>renderPage(true))},{text:"Close",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:async()=>{await updateReservation(x.id,$("#modalStatus").value,$("#modalNotes").value)}}
   ]);
 }
 async function updateReservation(id,status,notes){
@@ -195,7 +195,7 @@ function drawMenu(){
   const q=($("#menuSearch")?.value||"").toLowerCase(); const root=$("#menuRoot");
   root.innerHTML=cache.categories.map(cat=>{
     const items=cache.menu.filter(x=>String(x.category_id)===String(cat.id)&&`${x.name} ${x.description||""}`.toLowerCase().includes(q));
-    return `<section class="panel menu-group"><div class="menu-group-head"><h3>${esc(cat.name)}</h3><button class="mini-button accent" onclick='openMenuModal(null,${JSON.stringify(cat.id)})'>+ Item</button></div><div class="menu-items">${items.length?items.map(item=>`<div class="menu-item"><div><strong>${esc(item.name)}</strong><small>${esc(item.description||"")}</small>${item.image_url?`<span class="status done" style="margin-top:6px">In Taste of Firefly</span>`:""}</div><div><div class="price">${fmtNaira(item.price)}</div><div style="margin-top:6px">${statusBadge(item.available===false?"Sold Out":"Available")}</div></div><div class="row-actions"><button class="toggle ${item.available!==false?"on":""}" title="Toggle availability" onclick='toggleMenu(${JSON.stringify(item.id)},${item.available!==false})'><i></i></button><button class="mini-button" onclick='openMenuModal(${JSON.stringify(item.id)})'>Edit</button></div></div>`).join(""):`<div class="empty">No items in this category.</div>`}</div></section>`;
+    return `<section class="panel menu-group"><div class="menu-group-head"><h3>${esc(cat.name)}</h3><div class="row-actions"><button class="mini-button" title="Move up" onclick='moveCategory(${JSON.stringify(cat.id)},-1)'>↑</button><button class="mini-button" title="Move down" onclick='moveCategory(${JSON.stringify(cat.id)},1)'>↓</button><button class="mini-button" onclick='openCategoryModal(${JSON.stringify(cat.id)})'>Rename</button><button class="mini-button danger" onclick='deleteCategory(${JSON.stringify(cat.id)})'>Delete</button><button class="mini-button accent" onclick='openMenuModal(null,${JSON.stringify(cat.id)})'>+ Item</button></div></div><div class="menu-items">${items.length?items.map(item=>`<div class="menu-item"><div><strong>${esc(item.name)}</strong><small>${esc(item.description||"")}</small>${item.image_url?`<span class="status done" style="margin-top:6px">In Taste of Firefly</span>`:""}</div><div><div class="price">${fmtNaira(item.price)}</div><div style="margin-top:6px">${statusBadge(item.available===false?"Sold Out":"Available")}</div></div><div class="row-actions"><button class="toggle ${item.available!==false?"on":""}" title="Toggle availability" onclick='toggleMenu(${JSON.stringify(item.id)},${item.available!==false})'><i></i></button><button class="mini-button" onclick='openMenuModal(${JSON.stringify(item.id)})'>Edit</button></div></div>`).join(""):`<div class="empty">No items in this category.</div>`}</div></section>`;
   }).join("") || `<div class="panel empty">No categories yet. Add a category to start.</div>`;
 }
 async function toggleMenu(id,isAvailable){
@@ -206,26 +206,52 @@ function openMenuModal(id=null,categoryId=null){
   const item=id?cache.menu.find(x=>String(x.id)===String(id)):null;
   const cats=cache.categories.map(c=>`<option value="${c.id}" ${String(item?.category_id||categoryId)===String(c.id)?"selected":""}>${esc(c.name)}</option>`).join("");
   openModal(item?"Edit menu item":"Add menu item",`<div class="form-grid">
-    <div class="full-col"><label>Name<input id="mName" value="${esc(item?.name||"")}"></label></div>
+    <div class="full-col"><label>Name<input id="mName" value="${esc(item?.name||"")}></label></div>
     <div><label>Category<select id="mCategory">${cats}</select></label></div><div><label>Price (₦)<input id="mPrice" type="number" min="0" value="${item?.price??""}"></label></div>
     <div class="full-col"><label>Description<textarea id="mDesc">${esc(item?.description||"")}</textarea></label></div><div class="full-col"><label>Photo (optional)<input id="mImage" value="${esc(item?.image_url||"")}" placeholder="images/platter.jpg or https://…"><small class="muted" style="display:block;margin-top:6px;font-size:.68rem">Items with a photo appear in “A Taste of Firefly” on the menu page. Leave empty to keep an item out of it.</small></label></div>
     <div><label>Available<select id="mAvailable"><option value="true" ${item?.available!==false?"selected":""}>Available</option><option value="false" ${item?.available===false?"selected":""}>Sold Out</option></select></label></div>
     <div><label>Featured<select id="mFeatured"><option value="false" ${!item?.featured?"selected":""}>No</option><option value="true" ${item?.featured?"selected":""}>Yes</option></select></label></div>
-  </div>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:()=>saveMenu(item?.id)}]);
+  </div>`,[...(item?[{text:"Delete",class:"danger-button",action:()=>deleteRow("menu_items",item.id,`"${item.name}"`,renderMenu)}]:[]),{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:()=>saveMenu(item?.id)}]);
 }
 async function saveMenu(id){
   const payload={name:$("#mName").value.trim(),category_id:$("#mCategory").value,price:Number($("#mPrice").value),description:$("#mDesc").value.trim(),image_url:$("#mImage").value.trim()||null,available:$("#mAvailable").value==="true",featured:$("#mFeatured").value==="true",updated_at:new Date().toISOString()};
-  if(!payload.name||!Number.isFinite(payload.price)){toast("Name and price are required.","error");return}
+  if(!payload.name||$("#mPrice").value===""||!Number.isFinite(payload.price)){toast("Name and price are required.","error");return}
   const q=id?db.from("menu_items").update(payload).eq("id",id):db.from("menu_items").insert({...payload,display_order:cache.menu.length});
   const {error}=await q;if(error){toast(error.message,"error");return}closeModal();toast(id?"Menu item updated.":"Menu item added.");await renderMenu();
 }
-function openCategoryModal(){
-  openModal("Add category",`<label>Category name<input id="catName"></label><label>Description<textarea id="catDesc"></textarea></label>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:saveCategory}]);
+function openCategoryModal(id=null){
+  const c=id?cache.categories.find(x=>String(x.id)===String(id)):null;
+  openModal(c?"Edit category":"Add category",`<label>Category name<input id="catName" value="${esc(c?.name||"")}"></label><label>Description<textarea id="catDesc">${esc(c?.description||"")}</textarea></label>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:()=>saveCategory(c?.id)}]);
 }
-async function saveCategory(){
+async function saveCategory(id){
   const name=$("#catName").value.trim();if(!name){toast("Category name is required.","error");return}
-  const {error}=await db.from("menu_categories").insert({name,description:$("#catDesc").value.trim(),display_order:cache.categories.length});
-  if(error){toast(error.message,"error");return}closeModal();toast("Category added.");await renderMenu();
+  const body={name,description:$("#catDesc").value.trim()};
+  const {error}=id?await db.from("menu_categories").update({...body,updated_at:new Date().toISOString()}).eq("id",id):await db.from("menu_categories").insert({...body,display_order:cache.categories.length});
+  if(error){toast(error.message,"error");return}closeModal();toast(id?"Category updated.":"Category added.");await renderMenu();
+}
+async function moveCategory(id,dir){
+  if(!requireDb())return;
+  const cats=[...cache.categories].sort((a,b)=>a.display_order-b.display_order);
+  const i=cats.findIndex(c=>String(c.id)===String(id)),k=i+dir;
+  if(i<0||k<0||k>=cats.length)return;
+  const order=cats.map((c,n)=>({id:c.id,display_order:n}));
+  [order[i].display_order,order[k].display_order]=[order[k].display_order,order[i].display_order];
+  const res=await Promise.all(order.map(r=>db.from("menu_categories").update({display_order:r.display_order}).eq("id",r.id)));
+  const bad=res.find(r=>r.error);if(bad){toast(bad.error.message,"error");return}
+  await renderMenu();
+}
+async function deleteCategory(id){
+  const n=cache.menu.filter(x=>String(x.category_id)===String(id)).length;
+  if(n){toast(`This category still has ${n} item${n===1?"":"s"}. Delete or move them first.`,"error");return}
+  const c=cache.categories.find(x=>String(x.id)===String(id));
+  await deleteRow("menu_categories",id,`the category "${c?.name||""}"`,renderMenu);
+}
+async function deleteRow(table,id,label,after){
+  if(!requireDb())return;
+  if(!confirm(`Delete ${label}? This can't be undone.`))return;
+  const {error}=await db.from(table).delete().eq("id",id);
+  if(error){toast(error.message,"error");return}
+  closeModal();toast("Deleted.");await after();
 }
 
 async function renderOrders(){
@@ -242,7 +268,7 @@ function drawOrders(){
 async function viewOrder(id){
   const x=cache.orders.find(o=>String(o.id)===String(id));if(!x)return;
   let items=[];if(db){const r=await db.from("order_items").select("*").eq("order_id",id);items=r.data||[]}
-  openModal("Order details",`<div class="form-grid"><div><label>Customer<input value="${esc(x.customer_name||"—")}" disabled></label></div><div><label>Phone<input value="${esc(x.phone||"—")}" disabled></label></div><div><label>Total<input value="${fmtNaira(x.total)}" disabled></label></div><div><label>Status<select id="orderStatus"><option ${x.status==="New"?"selected":""}>New</option><option ${x.status==="Preparing"?"selected":""}>Preparing</option><option ${x.status==="Done"?"selected":""}>Done</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option></select></label></div><div class="full-col"><label>Items<textarea disabled>${items.map(i=>`${i.quantity} × ${i.item_name} — ${fmtNaira(i.subtotal)}`).join("\n")||"No item details saved."}</textarea></label></div></div>`,[{text:"Close",class:"secondary-button",action:closeModal},{text:"Save status",class:"primary-button",action:async()=>{const {error}=await db.from("orders").update({status:$("#orderStatus").value,updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}closeModal();toast("Order updated.");await renderOrders();}}]);
+  openModal("Order details",`<div class="form-grid"><div><label>Customer<input value="${esc(x.customer_name||"—")}" disabled></label></div><div><label>Phone<input value="${esc(x.phone||"—")}" disabled></label></div><div><label>Total<input value="${fmtNaira(x.total)}" disabled></label></div><div><label>Status<select id="orderStatus"><option ${x.status==="New"?"selected":""}>New</option><option ${x.status==="Preparing"?"selected":""}>Preparing</option><option ${x.status==="Done"?"selected":""}>Done</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option></select></label></div>${x.notes?`<div class="full-col"><label>Notes<input value="${esc(x.notes)}" disabled></label></div>`:""}<div class="full-col"><label>Items<textarea disabled>${items.map(i=>`${i.quantity} × ${i.item_name} — ${fmtNaira(i.subtotal)}`).join("\n")||"No item details saved."}</textarea></label></div></div>`,[{text:"Close",class:"secondary-button",action:closeModal},{text:"Save status",class:"primary-button",action:async()=>{const {error}=await db.from("orders").update({status:$("#orderStatus").value,updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}closeModal();toast("Order updated.");await renderOrders();}}]);
 }
 
 async function renderGallery(){
@@ -251,7 +277,7 @@ async function renderGallery(){
   cache.gallery=data||[];drawGallery();
 }
 function drawGallery(){
-  $("#galleryPanel").innerHTML=cache.gallery.length?`<div class="gallery-grid">${cache.gallery.map(x=>`<article class="gallery-card"><img src="${esc(x.image_url)}" alt="${esc(x.caption||"Firefly Café")}"><div class="gallery-info"><strong>${esc(x.caption||"Untitled")}</strong><small>${esc(x.category||"Uncategorized")}</small><div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${x.show_in_gallery?`<span class="status done">Gallery</span>`:""}${x.show_in_slideshow?`<span class="status preparing">Background</span>`:""}${!x.show_in_gallery&&!x.show_in_slideshow?`<span class="status cancelled">Hidden</span>`:""}</div><div class="row-actions"><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"gallery",${!!x.show_in_gallery})'>${x.show_in_gallery?"Remove from gallery":"Add to gallery"}</button><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"slideshow",${!!x.show_in_slideshow})'>${x.show_in_slideshow?"Remove from background":"Use as background"}</button></div></div></article>`).join("")}</div>`:`<div class="empty">No gallery images yet. Add an image record to begin.</div>`;
+  $("#galleryPanel").innerHTML=cache.gallery.length?`<div class="gallery-grid">${cache.gallery.map(x=>`<article class="gallery-card"><img src="${esc(x.image_url)}" alt="${esc(x.caption||"Firefly Café")}"><div class="gallery-info"><strong>${esc(x.caption||"Untitled")}</strong><small>${esc(x.category||"Uncategorized")}</small><div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${x.show_in_gallery?`<span class="status done">Gallery</span>`:""}${x.show_in_slideshow?`<span class="status preparing">Background</span>`:""}${!x.show_in_gallery&&!x.show_in_slideshow?`<span class="status cancelled">Hidden</span>`:""}</div><div class="row-actions"><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"gallery",${!!x.show_in_gallery})'>${x.show_in_gallery?"Remove from gallery":"Add to gallery"}</button><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"slideshow",${!!x.show_in_slideshow})'>${x.show_in_slideshow?"Remove from background":"Use as background"}</button><button class="mini-button danger" onclick='deleteRow("gallery",${JSON.stringify(x.id)},"this image",renderGallery)'>Delete</button></div></div></article>`).join("")}</div>`:`<div class="empty">No gallery images yet. Add an image record to begin.</div>`;
 }
 async function toggleGallery(id,type,current){
   const field=type==="gallery"?"show_in_gallery":"show_in_slideshow";const {error}=await db.from("gallery").update({[field]:!current,updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}toast("Gallery updated.");await renderGallery();
@@ -289,6 +315,6 @@ function openModal(title,body,actions=[]){
 }
 function closeModal(){$("#modalRoot").innerHTML=""}
 
-window.navigate=navigate;window.viewReservation=viewReservation;window.openReservationModal=openReservationModal;window.openMenuModal=openMenuModal;window.openCategoryModal=openCategoryModal;window.toggleMenu=toggleMenu;window.viewOrder=viewOrder;window.openGalleryModal=openGalleryModal;window.toggleGallery=toggleGallery;window.closeModal=closeModal;
+window.navigate=navigate;window.viewReservation=viewReservation;window.openReservationModal=openReservationModal;window.openMenuModal=openMenuModal;window.openCategoryModal=openCategoryModal;window.toggleMenu=toggleMenu;window.viewOrder=viewOrder;window.openGalleryModal=openGalleryModal;window.toggleGallery=toggleGallery;window.closeModal=closeModal;window.deleteRow=deleteRow;window.deleteCategory=deleteCategory;window.moveCategory=moveCategory;
 
 document.addEventListener("DOMContentLoaded",init);

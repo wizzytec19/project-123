@@ -22,20 +22,16 @@ document.addEventListener("DOMContentLoaded", () => {
   initMapsLinks();
   initFooterYear();
   initTasteShowcase();
-  initFavorites();
 
-  // Background slideshows and the gallery grid are managed from the admin
-  // (Gallery page). Wait briefly for them, then fall back to the images
-  // already written in the HTML so the page never waits on the network.
-  const ready = () => {
-    initBackgroundSlideshows();
-    initGalleryLightbox();
-    initGalleryFilters();
-  };
-  Promise.race([
-    loadManagedImages(),
-    new Promise((resolve) => setTimeout(resolve, 2500)),
-  ]).catch(() => {}).then(ready);
+  // Background slideshows and the gallery grid are managed from the admin.
+  // Everything here is safe to run before the data arrives: HTML images show
+  // straight away, handlers are delegated, and the slideshow timer re-queries
+  // its images, so a late Supabase response can't break anything.
+  initGalleryLightbox();
+  initGalleryFilters();
+  initBackgroundSlideshows();
+  loadSiteSettings();
+  loadManagedImages().catch(() => {}).then(activateSlides);
 });
 
 /* ---------- 0b. Managed images (Supabase "gallery" table) ----------
@@ -85,7 +81,62 @@ async function loadManagedImages() {
       const cat = String(r.category || "").toLowerCase();
       return `<div class="gallery-item" data-category="${escHtml(cat)}" tabindex="0" role="button" aria-label="View ${cap || "image"}"><img src="${escHtml(r.image_url)}" alt="${cap || "Firefly Café gallery image"}" loading="lazy">${cap ? `<span class="gallery-caption">${cap}</span>` : ""}</div>`;
     }).join("");
+    const active = document.querySelector(".gallery-tab.is-active");
+    if (active) applyGalleryFilter(active.dataset.category);
   }
+}
+
+/* ---------- 0c. Site settings (Supabase "site_settings" + "opening_hours") ----------
+   Edited in the admin (Settings). Hardcoded FIREFLY_CONFIG values are the fallback. */
+async function loadSiteSettings() {
+  const db = window.supabaseClient;
+  if (!db) return;
+  try {
+    const [st, hrs] = await Promise.all([
+      db.from("site_settings").select("*").limit(1).maybeSingle(),
+      db.from("opening_hours").select("*").order("day_index", { ascending: true }),
+    ]);
+    const cfg = st.data;
+    if (cfg) {
+      const wa = String(cfg.whatsapp_number || "").replace(/\D/g, "").replace(/^0/, "234");
+      if (wa) FIREFLY_CONFIG.whatsappNumber = wa;
+      if (cfg.address) { FIREFLY_CONFIG.address = cfg.address; FIREFLY_CONFIG.mapsQuery = cfg.address; }
+      if (/^https?:\/\//i.test(cfg.google_maps_link || "")) FIREFLY_CONFIG.mapsUrl = cfg.google_maps_link;
+      if (cfg.phone_number) document.querySelectorAll("[data-phone]").forEach((el) => { el.textContent = cfg.phone_number; });
+      if (cfg.announcement_enabled && cfg.announcement) showAnnouncement(cfg.announcement);
+    }
+    if (!hrs.error && hrs.data && hrs.data.length) renderOpeningHours(hrs.data);
+    initWhatsAppLinks();
+    initMapsLinks();
+  } catch (e) { console.warn("Site settings unavailable:", e); }
+}
+
+function renderOpeningHours(rows) {
+  const box = document.querySelector("[data-hours]");
+  if (!box) return;
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const t12 = (t) => { const [H, M] = String(t).split(":"); const h = Number(H); return `${h % 12 || 12}:${M} ${h < 12 ? "AM" : "PM"}`; };
+  const html = days.map((d, i) => {
+    const r = rows.find((x) => Number(x.day_index) === i);
+    if (!r) return "";
+    const label = r.is_open === false || !r.open_time || !r.close_time ? "Closed" : `${t12(r.open_time)} – ${t12(r.close_time)}`;
+    return `<div class="hours-row"><span>${d}</span><span>${label}</span></div>`;
+  }).join("");
+  if (html) box.innerHTML = html;
+}
+
+function showAnnouncement(text) {
+  if (document.querySelector(".announce")) return;
+  const bar = document.createElement("div");
+  bar.className = "announce";
+  bar.setAttribute("role", "status");
+  const msg = document.createElement("span");
+  msg.textContent = text;
+  const x = document.createElement("button");
+  x.type = "button"; x.setAttribute("aria-label", "Dismiss announcement"); x.innerHTML = "&times;";
+  x.addEventListener("click", () => bar.remove());
+  bar.append(msg, x);
+  document.body.appendChild(bar);
 }
 
 /* ---------- 1. Header: solid background after scrolling ---------- */
@@ -238,11 +289,22 @@ function initReservationForm() {
   const status = form.querySelector(".form-status");
   const submitBtn = form.querySelector('button[type="submit"]');
 
+  // No past dates.
+  const dateField = form.elements.date;
+  if (dateField) {
+    const t = new Date();
+    dateField.min = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  }
+
   const rules = {
     name: (v) => v.trim().length >= 2 || "Enter your full name.",
     phone: (v) =>
       /^[0-9+()\s-]{7,15}$/.test(v.trim()) || "Enter a valid phone number.",
-    date: (v) => v.trim().length > 0 || "Choose a date.",
+    date: (v) => {
+      if (!v.trim()) return "Choose a date.";
+      const min = form.elements.date.min;
+      return !min || v >= min || "Choose today or a later date.";
+    },
     time: (v) => v.trim().length > 0 || "Choose a time.",
     guests: (v) =>
       (Number(v) >= 1 && Number(v) <= 20) || "1–20 guests only.",
@@ -284,6 +346,8 @@ function initReservationForm() {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    // Honeypot: real visitors never see or fill this field.
+    if (form.elements.company && form.elements.company.value) { form.reset(); return; }
     if (!validate()) {
       setStatus("error", "Please fix the highlighted fields and try again.");
       return;
@@ -295,6 +359,7 @@ function initReservationForm() {
       date: form.elements.date.value,
       time: form.elements.time.value,
       guests: Number(form.elements.guests.value),
+      special_request: form.elements.special_request.value.trim().slice(0, 500),
     };
 
     submitBtn.disabled = true;
@@ -336,6 +401,7 @@ async function sendReservationToSupabase(payload) {
       reservation_date: payload.date,
       reservation_time: payload.time,
       guests: payload.guests,
+      notes: payload.special_request || null,
       status: "Pending",
     },
   ]);
@@ -360,9 +426,8 @@ function initWhatsAppLinks() {
 
 /* ---------- 7. Google Maps directions link ---------- */
 function initMapsLinks() {
-  const url =
-    "https://www.google.com/maps/search/?api=1&query=" +
-    encodeURIComponent(FIREFLY_CONFIG.mapsQuery);
+  const url = FIREFLY_CONFIG.mapsUrl ||
+    ("https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(FIREFLY_CONFIG.mapsQuery));
 
   document.querySelectorAll("[data-maps-link]").forEach((el) => {
     el.href = url;
@@ -395,80 +460,63 @@ function initGalleryLightbox() {
     image.removeAttribute("src");
     document.body.style.overflow = "";
   }
-  document.querySelectorAll(".gallery-item").forEach((item) => {
-    item.addEventListener("click", () => open(item));
-    item.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(item); }
-    });
+  // Delegated: keeps working when the grid is re-rendered from Supabase.
+  document.addEventListener("click", (e) => {
+    const item = e.target.closest(".gallery-item");
+    if (item) open(item);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && lightbox.classList.contains("is-open")) { close(); return; }
+    const item = e.target.closest && e.target.closest(".gallery-item");
+    if (item && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(item); }
   });
   closeBtn.addEventListener("click", close);
   lightbox.addEventListener("click", (e) => { if (e.target === lightbox) close(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && lightbox.classList.contains("is-open")) close(); });
 }
 
 /* ---------- 9. Background image slideshows ----------
    Every slideshow crossfades automatically and loops forever. */
-function initBackgroundSlideshows() {
-  document.querySelectorAll("[data-slideshow]").forEach((slideshow) => {
-    const slides = [...slideshow.querySelectorAll("img")];
-    if (!slides.length) return;
-    let index = 0;
-    slides[0].classList.add("is-active");
-    if (slides.length < 2) return;
-    window.setInterval(() => {
-      slides[index].classList.remove("is-active");
-      index = (index + 1) % slides.length;
-      slides[index].classList.add("is-active");
-    }, 5000);
+function activateSlides() {
+  document.querySelectorAll("[data-slideshow]").forEach((box) => {
+    const slides = [...box.querySelectorAll("img")];
+    if (slides.length && !slides.some((i) => i.classList.contains("is-active"))) slides[0].classList.add("is-active");
   });
+}
+
+/* One shared timer. It re-queries the images every tick (so images swapped in
+   from Supabase are picked up) and skips off-screen sections to save battery/data. */
+function initBackgroundSlideshows() {
+  activateSlides();
+  window.setInterval(() => {
+    if (document.hidden) return;
+    document.querySelectorAll("[data-slideshow]").forEach((box) => {
+      const r = box.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) return;
+      const slides = [...box.querySelectorAll("img")];
+      if (slides.length < 2) return;
+      const i = slides.findIndex((x) => x.classList.contains("is-active"));
+      if (i >= 0) slides[i].classList.remove("is-active");
+      slides[(i + 1) % slides.length].classList.add("is-active");
+    });
+  }, 5000);
 }
 
 /* ---------- 10. Gallery category filters ---------- */
-function initGalleryFilters() {
-  const tabs = document.querySelectorAll(".gallery-tab");
-  const items = document.querySelectorAll(".gallery-item");
-  if (!tabs.length) return;
-
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      tabs.forEach((t) => t.classList.remove("is-active"));
-      tab.classList.add("is-active");
-      const category = tab.dataset.category;
-
-      items.forEach((item) => {
-        const match = category === "all" || item.dataset.category === category;
-        item.style.display = match ? "" : "none";
-      });
-    });
+function applyGalleryFilter(category) {
+  document.querySelectorAll(".gallery-item").forEach((item) => {
+    item.style.display = category === "all" || item.dataset.category === category ? "" : "none";
   });
 }
-
-/* ---------- 10b. Our Favorites (homepage) ----------
-   Shows every menu item marked "Featured" in Admin -> Menu. */
-async function initFavorites() {
-  const grid = document.getElementById("favorites-grid");
-  if (!grid) return;
-  const db = window.supabaseClient;
-  if (!db) { grid.closest("section")?.remove(); return; }
-
-  const { data, error } = await db
-    .from("menu_items")
-    .select("id,name,price,description,image_url")
-    .eq("featured", true)
-    .eq("available", true)
-    .order("display_order", { ascending: true })
-    .limit(12);
-
-  if (error || !data || !data.length) { grid.closest("section")?.remove(); return; }
-
-  grid.innerHTML = data.map((it) => `
-    <a class="food-card" href="menu.html#item-${escHtml(it.id)}">
-      ${it.image_url ? `<figure><img src="${escHtml(it.image_url)}" alt="${escHtml(it.name)}" loading="lazy"></figure>` : ""}
-      <div class="food-card-body">
-        <div class="food-card-top"><h3>${escHtml(it.name)}</h3><span class="food-price">₦${Number(it.price || 0).toLocaleString("en-NG")}</span></div>
-        ${it.description ? `<p>${escHtml(it.description)}</p>` : ""}
-      </div>
-    </a>`).join("");
+function initGalleryFilters() {
+  document.addEventListener("click", (e) => {
+    const tab = e.target.closest(".gallery-tab");
+    if (!tab) return;
+    document.querySelectorAll(".gallery-tab").forEach((t) => {
+      t.classList.toggle("is-active", t === tab);
+      t.setAttribute("aria-pressed", String(t === tab));
+    });
+    applyGalleryFilter(tab.dataset.category);
+  });
 }
 
 /* ---------- 10. Footer year ---------- */
@@ -502,7 +550,7 @@ function initTasteShowcase() {
       const row = document.getElementById(card.getAttribute("href").slice(1));
       if (!row) return;
       row.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
-      document.querySelectorAll(".menu-name-row.is-highlighted").forEach((r) => r.classList.remove("is-highlighted"));
+      document.querySelectorAll(".menu-row.is-highlighted").forEach((r) => r.classList.remove("is-highlighted"));
       clearTimeout(highlightTimer);
       window.setTimeout(() => row.classList.add("is-highlighted"), reduce ? 0 : 450);
       highlightTimer = window.setTimeout(() => row.classList.remove("is-highlighted"), 3200);
@@ -725,7 +773,7 @@ function initTasteShowcase() {
   /* ---------- Step 3: hand the order to WhatsApp ---------- */
   const form = drawer.querySelector("[data-checkout]");
   const addrField = form.querySelector("[data-address-field]");
-  const WA_NUMBER = (typeof FIREFLY_CONFIG !== "undefined" && FIREFLY_CONFIG.whatsappNumber) || "2348104266494";
+  const waNumber = () => (typeof FIREFLY_CONFIG !== "undefined" && FIREFLY_CONFIG.whatsappNumber) || "2348104266494";
 
   try { form.elements.name.value = localStorage.getItem("firefly-customer-name") || ""; } catch (e) {}
 
@@ -765,9 +813,10 @@ function initTasteShowcase() {
     const address = form.elements.address.value.trim();
 
     try { localStorage.setItem("firefly-customer-name", name); } catch (err) {}
-    const url = "https://wa.me/" + WA_NUMBER + "?text=" + encodeURIComponent(buildMessage(name, type, address));
+    const url = "https://wa.me/" + waNumber() + "?text=" + encodeURIComponent(buildMessage(name, type, address));
     // Opened straight from the tap so mobile browsers don't block it.
     const win = window.open(url, "_blank", "noopener");
+    recordOrder(name, type, address); // fire-and-forget log for the admin Orders page
 
     // The message is already built, so the cart can be emptied straight away.
     form.elements.address.value = "";
@@ -777,6 +826,28 @@ function initTasteShowcase() {
 
     if (!win) window.location.href = url;
   });
+
+  // Saves the order in Supabase so the admin Orders page and dashboard are real.
+  // Never blocks or breaks the WhatsApp hand-off.
+  async function recordOrder(name, type, address) {
+    const db = window.supabaseClient;
+    if (!db || !lines.length || !window.crypto || !crypto.randomUUID) return;
+    const snap = lines.map((l) => ({ ...l }));
+    const sum = snap.reduce((a, l) => a + l.qty * l.price, 0);
+    const id = crypto.randomUUID();
+    try {
+      const { error } = await db.from("orders").insert({
+        id, customer_name: name.slice(0, 80), order_type: type, status: "New",
+        subtotal: sum, total: sum,
+        notes: type === "Delivery" && address ? ("Delivery address: " + address).slice(0, 300) : null,
+      });
+      if (error) return;
+      await db.from("order_items").insert(snap.map((l) => ({
+        order_id: id, menu_item_id: l.id, item_name: String(l.name).slice(0, 120),
+        quantity: l.qty, unit_price: l.price, subtotal: l.qty * l.price,
+      })));
+    } catch (e) { console.warn("Order log failed:", e); }
+  }
 
   window.FireflyCart = {
     reconcile, clear,
@@ -850,7 +921,7 @@ function initTasteShowcase() {
 
     const [cats, items] = await Promise.all([
       db.from("menu_categories").select("id,name,description,display_order").order("display_order", { ascending: true }),
-      db.from("menu_items").select("id,category_id,name,price,description,display_order,image_url").order("display_order", { ascending: true }),
+      db.from("menu_items").select("id,category_id,name,price,description,display_order,image_url,available").order("display_order", { ascending: true }),
     ]);
     if (cats.error || items.error) {
       console.error(cats.error || items.error);
@@ -873,21 +944,21 @@ function initTasteShowcase() {
         <div class="menu-category-head"><h2>${esc(c.name)}</h2>${c.description ? `<p>${esc(c.description)}</p>` : ""}</div>
         <div class="menu-names">
           ${byCat.get(c.id).map((it) => `
-            <div class="menu-row" id="item-${esc(it.id)}" data-item-id="${esc(it.id)}" data-name="${esc(it.name)}" data-price="${Number(it.price) || 0}">
+            <div class="menu-row${it.available === false ? " is-soldout" : ""}" id="item-${esc(it.id)}" data-item-id="${esc(it.id)}" data-name="${esc(it.name)}" data-price="${Number(it.price) || 0}">
               <div class="menu-row-info">
                 <h3>${esc(it.name)}</h3>
                 ${it.description ? `<p>${esc(it.description)}</p>` : ""}
               </div>
-              <div class="menu-row-side"><span class="menu-price">${naira(it.price)}</span><button type="button" class="add-btn" data-add aria-label="Add ${esc(it.name)} to cart"><span class="add-full">Add to Cart</span><span class="add-short" aria-hidden="true">+ Add</span></button></div>
+              <div class="menu-row-side"><span class="menu-price">${naira(it.price)}</span>${it.available === false ? `<span class="soldout-tag">Sold out</span>` : `<button type="button" class="add-btn" data-add aria-label="Add ${esc(it.name)} to cart"><span class="add-full">Add to Cart</span><span class="add-short" aria-hidden="true">+ Add</span></button>`}</div>
             </div>`).join("")}
         </div>
       </section>`).join("");
 
     // "A Taste of Firefly": every available item that has a photo (image_url).
-    renderShowcase((items.data || []).filter((it) => it.image_url), shown);
+    renderShowcase((items.data || []).filter((it) => it.image_url && it.available !== false), shown);
 
     // Drop cart lines for items no longer available and refresh any changed prices.
-    if (window.FireflyCart) window.FireflyCart.reconcile(items.data || []);
+    if (window.FireflyCart) window.FireflyCart.reconcile((items.data || []).filter((it) => it.available !== false));
 
     // The list is built after page load, so honour a #category link now.
     if (location.hash) {

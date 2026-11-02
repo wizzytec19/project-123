@@ -1,2 +1,4 @@
-supabase-schema.sql
-README.txt
+.DS_Store
+node_modules/
+.env
+.env.*
