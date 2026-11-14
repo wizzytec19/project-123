@@ -79,9 +79,10 @@ async function refreshBadges(){
 function handleNew(kind, row){
   if(row && row.id){ if(seenIds.has(row.id)) return; seenIds.add(row.id); }
   const who = (row && row.customer_name) || "a customer";
+  const refText = row && row.ref_code ? ` (${row.ref_code})` : "";
   const msg = kind === "reservation"
-    ? `New reservation from ${who}`
-    : `New order from ${who}${row && row.total ? ` — ${fmtNaira(row.total)}` : ""}`;
+    ? `New reservation from ${who}${refText}`
+    : `New order from ${who}${row && row.total ? ` — ${fmtNaira(row.total)}` : ""}${refText}`;
   toast(msg, "success", 8000);
   chime();
   flashTitle(`🔔 ${msg}`);
@@ -129,6 +130,30 @@ function stopAlerts(){
   clearInterval(pollTimer); pollTimer = null;
   if(db && alertChannel){ db.removeChannel(alertChannel); }
   alertChannel = null;
+}
+
+/* ---------- WhatsApp match: has the customer's message actually arrived? ----------
+   Every booking carries a Ref code that is also written in the WhatsApp message.
+   Pending/New entries with no confirmed message after 30 minutes are flagged. */
+const NO_MESSAGE_AFTER_MS = 30 * 60 * 1000;
+function waState(x){
+  if(!["Pending","New"].includes(x.status)) return null;
+  if(x.wa_received) return {cls:"done",label:"✓ Message received",ghost:false};
+  const age = Date.now() - new Date(x.created_at).getTime();
+  if(age < NO_MESSAGE_AFTER_MS) return {cls:"pending",label:"Waiting for WhatsApp…",ghost:false};
+  return {cls:"cancelled",label:"No message yet",ghost:true};
+}
+function waBadge(x){ const s=waState(x); return s?`<div style="margin-top:5px"><span class="status ${s.cls}">${s.label}</span></div>`:""; }
+function refTag(x){ return x.ref_code?`<small class="muted" style="display:block">Ref ${esc(x.ref_code)}</small>`:""; }
+function receivedBtn(table,x){ return waState(x)?`<button class="mini-button" onclick='toggleReceived("${table}",${JSON.stringify(x.id)},${!!x.wa_received})'>${x.wa_received?"Unmark":"Mark received"}</button>`:""; }
+async function toggleReceived(table,id,current){
+  if(!requireDb())return;
+  const {error}=await db.from(table).update({wa_received:!current,updated_at:new Date().toISOString()}).eq("id",id);
+  if(error){toast(error.message,"error");return}
+  const list=table==="reservations"?cache.reservations:cache.orders;
+  const row=list.find(r=>String(r.id)===String(id)); if(row) row.wa_received=!current;
+  if(table==="reservations") drawReservationTable(); else drawOrders();
+  toast(!current?"Marked as received.":"Marked as not received.");
 }
 
 function requireDb(){
@@ -233,6 +258,7 @@ async function renderDashboard(){
   const todayOrders=orders.filter(x=>x.created_at&&localISO(new Date(x.created_at))===todayStr);
   const revenue=todayOrders.reduce((s,x)=>s+Number(x.total||0),0);
   const available=menu.filter(x=>x.available!==false).length, sold=menu.filter(x=>x.available===false).length;
+  const ghosts=[...reservations.filter(x=>x.status==="Pending"),...orders.filter(x=>x.status==="New")].filter(x=>waState(x)?.ghost).length;
   const recent=[...reservations].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,5);
   const greet=new Date().getHours()<12?"Good morning":new Date().getHours()<17?"Good afternoon":"Good evening";
   root.innerHTML=`<div class="welcome"><div><div class="eyebrow">OVERVIEW</div><h1>${greet}, Admin 👋</h1><div class="date-text">${new Date().toLocaleDateString("en-NG",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div></div></div>
@@ -247,6 +273,7 @@ async function renderDashboard(){
   <div class="grid-2">
     <section class="panel"><div class="panel-head"><h3>Needs attention</h3><small>Quick actions</small></div><div class="attention">
       ${pending.length?`<div class="attention-item"><div><strong>${pending.length} pending reservation${pending.length===1?"":"s"}</strong><span>Review customer bookings</span></div><button onclick="navigate('reservations')">Review →</button></div>`:`<div class="attention-item"><div><strong>No pending reservations</strong><span>You're all caught up.</span></div></div>`}
+      ${ghosts?`<div class="attention-item"><div><strong>${ghosts} booking${ghosts===1?"":"s"} with no WhatsApp message yet</strong><span>The customer may not have tapped send. Check before preparing.</span></div><button onclick="navigate('reservations')">Check →</button></div>`:""}
       ${sold?`<div class="attention-item"><div><strong>${sold} menu item${sold===1?"":"s"} sold out</strong><span>Update availability when ready.</span></div><button onclick="navigate('menu')">Menu →</button></div>`:""}
       ${todayOrders.length?`<div class="attention-item"><div><strong>${todayOrders.length} order${todayOrders.length===1?"":"s"} today</strong><span>Check current order status.</span></div><button onclick="navigate('orders')">Orders →</button></div>`:""}
     </div></section>
@@ -266,7 +293,7 @@ function tableReservations(rows){
 
 async function renderReservations(){
   const root=$("#pageContent"); root.innerHTML=`<div class="page-header"><div><div class="eyebrow">BOOKINGS</div><h1>Reservations</h1><p>Manage customer bookings and follow-ups.</p></div><button class="primary-button" onclick="openReservationModal()">+ Add reservation</button></div>
-  <div class="toolbar"><input id="reservationSearch" placeholder="Search name or phone…"><select id="reservationFilter"><option>All</option><option>Today</option><option>Upcoming</option><option>Past</option><option>Pending</option><option>Confirmed</option><option>Cancelled</option><option>No-show</option></select></div>
+  <div class="toolbar"><input id="reservationSearch" placeholder="Search name, phone or ref…"><select id="reservationFilter"><option>All</option><option>Today</option><option>Upcoming</option><option>Past</option><option>Pending</option><option>Confirmed</option><option>Cancelled</option><option>No-show</option></select></div>
   <section class="panel" id="reservationPanel"><div class="empty">Loading reservations…</div></section>`;
   const {data,error}=await fetchTable("reservations",{order:"reservation_date",ascending:true,limit:500});
   if(error){ $("#reservationPanel").innerHTML=`<div class="empty">Could not load reservations.<br>${esc(error.message)}</div>`; return; }
@@ -275,11 +302,11 @@ async function renderReservations(){
 function bindReservationFilters(){ $("#reservationSearch").addEventListener("input",drawReservationTable); $("#reservationFilter").addEventListener("change",drawReservationTable); }
 function drawReservationTable(){
   const q=($("#reservationSearch")?.value||"").toLowerCase(), filter=$("#reservationFilter")?.value||"All"; const today=localISO();
-  let rows=cache.reservations.filter(x=>`${x.customer_name} ${x.phone}`.toLowerCase().includes(q));
+  let rows=cache.reservations.filter(x=>`${x.customer_name} ${x.phone} ${x.ref_code||""}`.toLowerCase().includes(q));
   rows=rows.filter(x=>{
     if(filter==="All")return true;if(filter==="Today")return x.reservation_date===today;if(filter==="Upcoming")return x.reservation_date>=today&&!["Cancelled","No-show"].includes(x.status);if(filter==="Past")return x.reservation_date<today;return x.status===filter;
   });
-  $("#reservationPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Customer</th><th>Phone</th><th>Date</th><th>Time</th><th>Guests</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(x=>`<tr><td><strong>${esc(x.customer_name)}</strong><small class="muted">${esc(x.notes||"")}</small></td><td>${esc(x.phone)}</td><td>${dateOnly(x.reservation_date)}</td><td>${timeOnly(x.reservation_time)}</td><td>${esc(x.guests)}</td><td>${statusBadge(x.status)}</td><td><div class="row-actions"><button class="mini-button" onclick='viewReservation(${JSON.stringify(x.id)})'>View</button><a class="mini-button" href="tel:${esc(x.phone)}">Call</a><a class="mini-button accent" target="_blank" href="${waLink(x)}">WhatsApp</a></div></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No reservations found.</div>`;
+  $("#reservationPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Customer</th><th>Phone</th><th>Date</th><th>Time</th><th>Guests</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(x=>`<tr class="${waState(x)?.ghost?"unreceived":""}"><td><strong>${esc(x.customer_name)}</strong>${refTag(x)}<small class="muted">${esc(x.notes||"")}</small>${waBadge(x)}</td><td>${esc(x.phone)}</td><td>${dateOnly(x.reservation_date)}</td><td>${timeOnly(x.reservation_time)}</td><td>${esc(x.guests)}</td><td>${statusBadge(x.status)}</td><td><div class="row-actions"><button class="mini-button" onclick='viewReservation(${JSON.stringify(x.id)})'>View</button><a class="mini-button" href="tel:${esc(x.phone)}">Call</a><a class="mini-button accent" target="_blank" href="${waLink(x)}">WhatsApp</a>${receivedBtn("reservations",x)}</div></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No reservations found.</div>`;
 }
 function waLink(x){ const n=String(x.phone||"").replace(/\D/g,"").replace(/^0/,"234"); const msg=encodeURIComponent(`Hello ${x.customer_name}, this is Firefly Café regarding your reservation for ${x.reservation_date} at ${timeOnly(x.reservation_time)}.`); return `https://wa.me/${n}?text=${msg}`; }
 function viewReservation(id){
@@ -294,7 +321,7 @@ function viewReservation(id){
   ]);
 }
 async function updateReservation(id,status,notes){
-  if(!requireDb())return; const {error}=await db.from("reservations").update({status,notes,updated_at:new Date().toISOString()}).eq("id",id);
+  if(!requireDb())return; const {error}=await db.from("reservations").update({status,notes,...(status==="Confirmed"?{wa_received:true}:{}),updated_at:new Date().toISOString()}).eq("id",id);
   if(error){toast(error.message,"error");return} closeModal();toast("Reservation updated.");await renderPage(true);
 }
 function openReservationModal(){
@@ -381,20 +408,20 @@ async function deleteRow(table,id,label,after){
 }
 
 async function renderOrders(){
-  const root=$("#pageContent");root.innerHTML=`<div class="page-header"><div><div class="eyebrow">CUSTOMER ORDERS</div><h1>Orders</h1><p>Track orders recorded before the WhatsApp handoff.</p></div></div><div class="toolbar"><input id="orderSearch" placeholder="Search order or customer…"><select id="orderFilter"><option>All</option><option>New</option><option>Preparing</option><option>Done</option><option>Cancelled</option></select></div><section class="panel" id="orderPanel"><div class="empty">Loading orders…</div></section>`;
+  const root=$("#pageContent");root.innerHTML=`<div class="page-header"><div><div class="eyebrow">CUSTOMER ORDERS</div><h1>Orders</h1><p>Track orders recorded before the WhatsApp handoff.</p></div></div><div class="toolbar"><input id="orderSearch" placeholder="Search ref, order or customer…"><select id="orderFilter"><option>All</option><option>New</option><option>Preparing</option><option>Done</option><option>Cancelled</option></select></div><section class="panel" id="orderPanel"><div class="empty">Loading orders…</div></section>`;
   const {data,error}=await fetchTable("orders",{order:"created_at",limit:500});if(error){$("#orderPanel").innerHTML=`<div class="empty">Could not load orders. ${esc(error.message)}</div>`;return}
   cache.orders=data||[];bindOrderFilters();drawOrders();
 }
 function bindOrderFilters(){$("#orderSearch").addEventListener("input",drawOrders);$("#orderFilter").addEventListener("change",drawOrders)}
 function drawOrders(){
   const q=($("#orderSearch")?.value||"").toLowerCase(), f=$("#orderFilter")?.value||"All";
-  const rows=cache.orders.filter(x=>`${x.id} ${x.customer_name} ${x.phone}`.toLowerCase().includes(q)&& (f==="All"||x.status===f));
-  $("#orderPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Type</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td><strong>#${esc(String(x.id).slice(0,8))}</strong></td><td>${esc(x.customer_name||"—")}<small class="muted">${esc(x.phone||"")}</small></td><td>${fmtNaira(x.total)}</td><td>${esc(x.order_type||"—")}</td><td>${statusBadge(x.status)}</td><td>${dateOnly(x.created_at)}</td><td><button class="mini-button" onclick='viewOrder(${JSON.stringify(x.id)})'>View</button></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No orders found.</div>`;
+  const rows=cache.orders.filter(x=>`${x.id} ${x.customer_name} ${x.phone} ${x.ref_code||""}`.toLowerCase().includes(q)&& (f==="All"||x.status===f));
+  $("#orderPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Type</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr class="${waState(x)?.ghost?"unreceived":""}"><td><strong>${x.ref_code?esc(x.ref_code):"#"+esc(String(x.id).slice(0,8))}</strong>${waBadge(x)}</td><td>${esc(x.customer_name||"—")}<small class="muted">${esc(x.phone||"")}</small></td><td>${fmtNaira(x.total)}</td><td>${esc(x.order_type||"—")}</td><td>${statusBadge(x.status)}</td><td>${dateOnly(x.created_at)}</td><td><div class="row-actions"><button class="mini-button" onclick='viewOrder(${JSON.stringify(x.id)})'>View</button>${receivedBtn("orders",x)}</div></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No orders found.</div>`;
 }
 async function viewOrder(id){
   const x=cache.orders.find(o=>String(o.id)===String(id));if(!x)return;
   let items=[];if(db){const r=await db.from("order_items").select("*").eq("order_id",id);items=r.data||[]}
-  openModal("Order details",`<div class="form-grid"><div><label>Customer<input value="${esc(x.customer_name||"—")}" disabled></label></div><div><label>Phone<input value="${esc(x.phone||"—")}" disabled></label></div><div><label>Total<input value="${fmtNaira(x.total)}" disabled></label></div><div><label>Status<select id="orderStatus"><option ${x.status==="New"?"selected":""}>New</option><option ${x.status==="Preparing"?"selected":""}>Preparing</option><option ${x.status==="Done"?"selected":""}>Done</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option></select></label></div>${x.notes?`<div class="full-col"><label>Notes<input value="${esc(x.notes)}" disabled></label></div>`:""}<div class="full-col"><label>Items<textarea disabled>${items.map(i=>`${i.quantity} × ${i.item_name} — ${fmtNaira(i.subtotal)}`).join("\n")||"No item details saved."}</textarea></label></div></div>`,[{text:"Close",class:"secondary-button",action:closeModal},{text:"Save status",class:"primary-button",action:async()=>{const {error}=await db.from("orders").update({status:$("#orderStatus").value,updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}closeModal();toast("Order updated.");await renderOrders();}}]);
+  openModal("Order details",`<div class="form-grid"><div><label>Customer<input value="${esc(x.customer_name||"—")}" disabled></label></div><div><label>Phone<input value="${esc(x.phone||"—")}" disabled></label></div><div><label>Total<input value="${fmtNaira(x.total)}" disabled></label></div><div><label>Status<select id="orderStatus"><option ${x.status==="New"?"selected":""}>New</option><option ${x.status==="Preparing"?"selected":""}>Preparing</option><option ${x.status==="Done"?"selected":""}>Done</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option></select></label></div>${x.notes?`<div class="full-col"><label>Notes<input value="${esc(x.notes)}" disabled></label></div>`:""}<div class="full-col"><label>Items<textarea disabled>${items.map(i=>`${i.quantity} × ${i.item_name} — ${fmtNaira(i.subtotal)}`).join("\n")||"No item details saved."}</textarea></label></div></div>`,[{text:"Close",class:"secondary-button",action:closeModal},{text:"Save status",class:"primary-button",action:async()=>{const {error}=await db.from("orders").update({status:$("#orderStatus").value,...(["Preparing","Done"].includes($("#orderStatus").value)?{wa_received:true}:{}),updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}closeModal();toast("Order updated.");await renderOrders();}}]);
 }
 
 async function renderGallery(){
@@ -441,6 +468,6 @@ function openModal(title,body,actions=[]){
 }
 function closeModal(){$("#modalRoot").innerHTML=""}
 
-window.navigate=navigate;window.viewReservation=viewReservation;window.openReservationModal=openReservationModal;window.openMenuModal=openMenuModal;window.openCategoryModal=openCategoryModal;window.toggleMenu=toggleMenu;window.viewOrder=viewOrder;window.openGalleryModal=openGalleryModal;window.toggleGallery=toggleGallery;window.closeModal=closeModal;window.deleteRow=deleteRow;window.deleteCategory=deleteCategory;window.moveCategory=moveCategory;
+window.toggleReceived=toggleReceived;window.navigate=navigate;window.viewReservation=viewReservation;window.openReservationModal=openReservationModal;window.openMenuModal=openMenuModal;window.openCategoryModal=openCategoryModal;window.toggleMenu=toggleMenu;window.viewOrder=viewOrder;window.openGalleryModal=openGalleryModal;window.toggleGallery=toggleGallery;window.closeModal=closeModal;window.deleteRow=deleteRow;window.deleteCategory=deleteCategory;window.moveCategory=moveCategory;
 
 document.addEventListener("DOMContentLoaded",init);

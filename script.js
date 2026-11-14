@@ -13,6 +13,7 @@ const FIREFLY_CONFIG = {
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  initStartPosition();
   initHeaderScroll();
   initMobileNav();
   initVideoComponents();
@@ -34,6 +35,16 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSiteSettings();
   loadManagedImages().catch(() => {}).then(activateSlides);
 });
+
+/* Short reference code (e.g. R-4F7K / O-9XQ2) shown in the WhatsApp message and
+   saved with the booking, so the admin can match each WhatsApp message to its entry. */
+function makeRef(prefix) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I to avoid mix-ups
+  const bytes = new Uint8Array(4);
+  if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < 4; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return prefix + "-" + [...bytes].map((n) => chars[n % chars.length]).join("");
+}
 
 /* ---------- 0b. Managed images (Supabase "gallery" table) ----------
    Two separate switches in the admin decide where an image appears:
@@ -138,6 +149,54 @@ function showAnnouncement(text) {
   x.addEventListener("click", () => bar.remove());
   bar.append(msg, x);
   document.body.appendChild(bar);
+}
+
+/* ---------- 0d. Always open the homepage in the right place ----------
+   Problems this fixes:
+   - the browser "remembering" an old scroll position (footer, reservation...)
+   - an old #section left in the address bar after clicking a menu link
+   - images/sections loading late and pushing the page to the wrong spot
+   Behaviour: opens at the top, unless the link deliberately points to a section
+   (e.g. menu page -> "Reserve"), in which case it lands exactly on that section. */
+function initStartPosition() {
+  if (!document.body.classList.contains("page-home")) return; // menu page has its own logic
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
+  let hash = "";
+  try { hash = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
+  const target = hash ? document.getElementById(hash) : null;
+
+  // Stop correcting as soon as the visitor scrolls or interacts themselves.
+  let userMoved = false;
+  ["wheel", "touchstart", "keydown", "mousedown"].forEach((ev) =>
+    window.addEventListener(ev, () => { userMoved = true; }, { once: true, passive: true })
+  );
+  const place = () => {
+    if (userMoved) return;
+    if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+  };
+
+  place();
+  window.addEventListener("load", () => {
+    place();                    // images are in, layout has settled
+    setTimeout(place, 400);     // catch late layout shifts
+    setTimeout(() => {          // keep the address bar clean so a reload starts at the top
+      if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+    }, 700);
+  });
+
+  // In-page menu links: scroll there, but don't leave #section in the URL.
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const id = a.getAttribute("href").slice(1);
+    const el = id ? document.getElementById(id) : null;
+    if (!el) return;
+    e.preventDefault();
+    el.scrollIntoView();
+    if (id === "main") { el.setAttribute("tabindex", "-1"); el.focus({ preventScroll: true }); }
+    history.replaceState(null, "", location.pathname + location.search);
+  });
 }
 
 /* ---------- 1. Header: solid background after scrolling ---------- */
@@ -365,6 +424,7 @@ function initReservationForm() {
       time: form.elements.time.value,
       guests: Number(form.elements.guests.value),
       special_request: form.elements.special_request.value.trim().slice(0, 500),
+      ref: makeRef("R"),
     };
 
     const prettyDate = new Date(payload.date + "T00:00:00").toLocaleDateString("en-NG", {
@@ -383,6 +443,7 @@ function initReservationForm() {
       `Guests: ${payload.guests}`,
       payload.special_request ? `Special request: ${payload.special_request}` : null,
       "",
+      `Ref: ${payload.ref}`,
       "Please confirm my reservation. Thank you!",
     ].filter((r) => r !== null).join("\n");
 
@@ -408,17 +469,22 @@ async function sendReservationToSupabase(payload) {
     );
   }
 
-  const { error } = await window.supabaseClient.from("reservations").insert([
-    {
-      customer_name: payload.name,
-      phone: payload.phone,
-      reservation_date: payload.date,
-      reservation_time: payload.time,
-      guests: payload.guests,
-      notes: payload.special_request || null,
-      status: "Pending",
-    },
-  ]);
+  const row = {
+    customer_name: payload.name,
+    phone: payload.phone,
+    reservation_date: payload.date,
+    reservation_time: payload.time,
+    guests: payload.guests,
+    notes: payload.special_request || null,
+    status: "Pending",
+    ref_code: payload.ref || null,
+  };
+  let { error } = await window.supabaseClient.from("reservations").insert([row]);
+  // If the database hasn't been updated with the ref_code column yet, still save the booking.
+  if (error && /ref_code|column/i.test(error.message || "")) {
+    delete row.ref_code;
+    ({ error } = await window.supabaseClient.from("reservations").insert([row]));
+  }
 
   if (error) throw error;
 }
@@ -830,7 +896,7 @@ function initTasteShowcase() {
     wrap.querySelector(".field-error").textContent = msg || "";
   }
 
-  function buildMessage(name, type, address) {
+  function buildMessage(name, type, address, ref) {
     const rows = lines.map((l) => `${l.qty} × ${l.name} — ${naira(l.qty * l.price)}`);
     return [
       "Hello Firefly Café, I'd like to place an order.",
@@ -843,6 +909,7 @@ function initTasteShowcase() {
       ...rows,
       "",
       `Total: ${naira(total())}`,
+      `Ref: ${ref}`,
     ].filter((r) => r !== null).join("\n");
   }
 
@@ -855,10 +922,11 @@ function initTasteShowcase() {
     const address = form.elements.address.value.trim();
 
     try { localStorage.setItem("firefly-customer-name", name); } catch (err) {}
-    const url = "https://wa.me/" + waNumber() + "?text=" + encodeURIComponent(buildMessage(name, type, address));
+    const ref = makeRef("O");
+    const url = "https://wa.me/" + waNumber() + "?text=" + encodeURIComponent(buildMessage(name, type, address, ref));
     // Opened straight from the tap so mobile browsers don't block it.
     const win = window.open(url, "_blank", "noopener");
-    recordOrder(name, type, address); // fire-and-forget log for the admin Orders page
+    recordOrder(name, type, address, ref); // fire-and-forget log for the admin Orders page
 
     // The message is already built, so the cart can be emptied straight away.
     form.elements.address.value = "";
@@ -871,18 +939,24 @@ function initTasteShowcase() {
 
   // Saves the order in Supabase so the admin Orders page and dashboard are real.
   // Never blocks or breaks the WhatsApp hand-off.
-  async function recordOrder(name, type, address) {
+  async function recordOrder(name, type, address, ref) {
     const db = window.supabaseClient;
     if (!db || !lines.length || !window.crypto || !crypto.randomUUID) return;
     const snap = lines.map((l) => ({ ...l }));
     const sum = snap.reduce((a, l) => a + l.qty * l.price, 0);
     const id = crypto.randomUUID();
     try {
-      const { error } = await db.from("orders").insert({
+      const row = {
         id, customer_name: name.slice(0, 80), order_type: type, status: "New",
-        subtotal: sum, total: sum,
+        subtotal: sum, total: sum, ref_code: ref || null,
         notes: type === "Delivery" && address ? ("Delivery address: " + address).slice(0, 300) : null,
-      });
+      };
+      let { error } = await db.from("orders").insert(row);
+      // If the database hasn't been updated with the ref_code column yet, still save the order.
+      if (error && /ref_code|column/i.test(error.message || "")) {
+        delete row.ref_code;
+        ({ error } = await db.from("orders").insert(row));
+      }
       if (error) return;
       await db.from("order_items").insert(snap.map((l) => ({
         order_id: id, menu_item_id: l.id, item_name: String(l.name).slice(0, 120),

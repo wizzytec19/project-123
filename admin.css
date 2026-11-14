@@ -43,3 +43,5 @@ label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:16px}input,
 }
 @media(max-width:430px){.stats{grid-template-columns:1fr}.gallery-grid{grid-template-columns:1fr}.topbar h2{font-size:1.15rem}.secondary-button{padding:9px}.hours-row{grid-template-columns:1fr 65px 1fr}.hours-row input:last-child{grid-column:2/-1}}
 .modal-foot .danger-button{margin-right:auto}.menu-group-head .row-actions{justify-content:flex-end}
+
+.table tr.unreceived td{opacity:.62}.table tr.unreceived td:last-child{opacity:1}
