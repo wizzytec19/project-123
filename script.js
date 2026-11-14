@@ -157,7 +157,8 @@ function showAnnouncement(text) {
    - an old #section left in the address bar after clicking a menu link
    - images/sections loading late and pushing the page to the wrong spot
    Behaviour: opens at the top, unless the link deliberately points to a section
-   (e.g. menu page -> "Reserve"), in which case it lands exactly on that section. */
+   (e.g. menu page -> "Reserve"), in which case it lands exactly on that section.
+   Pressing Back (e.g. from the menu page) returns to exactly where the visitor was. */
 function initStartPosition() {
   if (!document.body.classList.contains("page-home")) return; // menu page has its own logic
   if ("scrollRestoration" in history) history.scrollRestoration = "manual";
@@ -171,9 +172,25 @@ function initStartPosition() {
   ["wheel", "touchstart", "keydown", "mousedown"].forEach((ev) =>
     window.addEventListener(ev, () => { userMoved = true; }, { once: true, passive: true })
   );
+  // Back/forward: return to the position the visitor left from.
+  const navEntry = (performance.getEntriesByType && performance.getEntriesByType("navigation")[0]) || {};
+  let savedY = null;
+  if (navEntry.type === "back_forward" && !target) {
+    try {
+      const v = sessionStorage.getItem("firefly-home-scroll");
+      if (v !== null && Number.isFinite(Number(v))) savedY = Number(v);
+    } catch (e) {}
+  }
+  const saveY = () => {
+    try { sessionStorage.setItem("firefly-home-scroll", String(Math.round(window.scrollY))); } catch (e) {}
+  };
+  window.addEventListener("pagehide", saveY);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveY(); });
+
   const place = () => {
     if (userMoved) return;
-    if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+    if (target) target.scrollIntoView();
+    else window.scrollTo(0, savedY !== null ? savedY : 0);
   };
 
   place();
