@@ -345,7 +345,7 @@ function initReservationForm() {
     status.textContent = message;
   }
 
-  form.addEventListener("submit", async (event) => {
+  form.addEventListener("submit", (event) => {
     event.preventDefault();
     // Honeypot: real visitors never see or fill this field.
     if (form.elements.company && form.elements.company.value) { form.reset(); return; }
@@ -353,6 +353,10 @@ function initReservationForm() {
       setStatus("error", "Please fix the highlighted fields and try again.");
       return;
     }
+
+    // Clear any old message so nothing from the website shows up
+    status.className = "form-status";
+    status.textContent = "";
 
     const payload = {
       name: form.elements.name.value.trim(),
@@ -363,26 +367,35 @@ function initReservationForm() {
       special_request: form.elements.special_request.value.trim().slice(0, 500),
     };
 
-    submitBtn.disabled = true;
-    setStatus("loading", "Sending your reservation…");
+    const prettyDate = new Date(payload.date + "T00:00:00").toLocaleDateString("en-NG", {
+      weekday: "short", day: "numeric", month: "short", year: "numeric",
+    });
+    const [H, M] = payload.time.split(":");
+    const prettyTime = `${Number(H) % 12 || 12}:${M} ${Number(H) < 12 ? "AM" : "PM"}`;
 
-    try {
-      await sendReservationToSupabase(payload);
+    const message = [
+      "Hello Firefly Café, I'd like to reserve a table.",
+      "",
+      `Name: ${payload.name}`,
+      `Phone: ${payload.phone}`,
+      `Date: ${prettyDate}`,
+      `Time: ${prettyTime}`,
+      `Guests: ${payload.guests}`,
+      payload.special_request ? `Special request: ${payload.special_request}` : null,
+      "",
+      "Please confirm my reservation. Thank you!",
+    ].filter((r) => r !== null).join("\n");
 
-      setStatus(
-        "success",
-        `Thanks, ${payload.name.split(" ")[0]} — we've received your request for ${payload.guests} guest(s) on ${payload.date} at ${payload.time}. We'll confirm by phone shortly.`
-      );
-      form.reset();
-    } catch (err) {
-      console.error("Reservation error:", err);
-      setStatus(
-        "error",
-        "We couldn't send your reservation. Please try again or WhatsApp us directly."
-      );
-    } finally {
-      submitBtn.disabled = false;
-    }
+    const url = "https://wa.me/" + FIREFLY_CONFIG.whatsappNumber + "?text=" + encodeURIComponent(message);
+
+    // Go straight to WhatsApp (opened directly from the tap so it isn't blocked)
+    const win = window.open(url, "_blank", "noopener");
+
+    // Quietly save to Supabase in the background so it appears in the admin
+    sendReservationToSupabase(payload).catch((err) => console.warn("Reservation log failed:", err));
+
+    form.reset();
+    if (!win) window.location.href = url;
   });
 }
 
