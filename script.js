@@ -430,6 +430,19 @@ function initReservationForm() {
       return;
     }
 
+    // Spam / double-tap guards (the database enforces the real limits).
+    if (performance.now() < 3000) {
+      setStatus("error", "One moment, then tap the button again.");
+      return;
+    }
+    try {
+      const last = Number(localStorage.getItem("firefly-last-reservation") || 0);
+      if (Date.now() - last < 60000) {
+        setStatus("error", "You've just sent a reservation. Please wait a minute before sending another.");
+        return;
+      }
+    } catch (e) {}
+
     // Clear any old message so nothing from the website shows up
     status.className = "form-status";
     status.textContent = "";
@@ -465,6 +478,8 @@ function initReservationForm() {
     ].filter((r) => r !== null).join("\n");
 
     const url = "https://wa.me/" + FIREFLY_CONFIG.whatsappNumber + "?text=" + encodeURIComponent(message);
+
+    try { localStorage.setItem("firefly-last-reservation", String(Date.now())); } catch (e) {}
 
     // Go straight to WhatsApp (opened directly from the tap so it isn't blocked)
     const win = window.open(url, "_blank", "noopener");
@@ -937,6 +952,16 @@ function initTasteShowcase() {
     if (name.length < 2) { setError(form.elements.name, "Please enter your name."); form.elements.name.focus(); return; }
     const type = form.elements.type.value;
     const address = form.elements.address.value.trim();
+
+    // Spam / double-tap guard (the database enforces the real limits).
+    try {
+      const last = Number(localStorage.getItem("firefly-last-order") || 0);
+      if (Date.now() - last < 15000) {
+        setError(form.elements.name, "Please wait a few seconds before sending another order.");
+        return;
+      }
+      localStorage.setItem("firefly-last-order", String(Date.now()));
+    } catch (err) {}
 
     try { localStorage.setItem("firefly-customer-name", name); } catch (err) {}
     const ref = makeRef("O");
