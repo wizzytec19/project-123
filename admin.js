@@ -12,13 +12,125 @@ let currentUser = null;
 let currentPage = "dashboard";
 let cache = { reservations: [], orders: [], categories: [], menu: [], gallery: [] };
 
-function toast(message, type="success"){
+function toast(message, type="success", ms=3500){
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   el.textContent = message;
   $("#toastRoot").appendChild(el);
-  setTimeout(()=>el.remove(), 3500);
+  setTimeout(()=>el.remove(), ms);
 }
+/* ---------- Live alerts: new reservations & orders ----------
+   Uses Supabase Realtime (instant) plus a 45-second check as a safety net.
+   Shows a toast, plays a chime, flashes the tab title, sends a desktop
+   notification (if allowed) and keeps the sidebar badges up to date. */
+let alertChannel = null, pollTimer = null, audioCtx = null, titleTimer = null;
+const baseTitle = document.title;
+const seenIds = new Set();
+let lastPoll = new Date().toISOString();
+let soundOn = true;
+try { soundOn = localStorage.getItem("firefly-admin-sound") !== "off"; } catch (e) {}
+
+function unlockAudio(){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if(audioCtx.state === "suspended") audioCtx.resume();
+  }catch(e){}
+}
+function chime(){
+  if(!soundOn || !audioCtx) return;
+  try{
+    [[880,0],[1175,0.18],[1568,0.36]].forEach(([f,t])=>{
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+      const s = audioCtx.currentTime + t;
+      g.gain.setValueAtTime(0.0001, s);
+      g.gain.exponentialRampToValueAtTime(0.25, s + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, s + 0.4);
+      o.start(s); o.stop(s + 0.45);
+    });
+  }catch(e){}
+}
+function flashTitle(text){
+  clearInterval(titleTimer);
+  if(!document.hidden) return;
+  let on = true;
+  titleTimer = setInterval(()=>{ document.title = on ? text : baseTitle; on = !on; }, 1000);
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(!document.hidden){ clearInterval(titleTimer); document.title = baseTitle; }
+});
+function updateSoundButton(){
+  const b = $("#soundButton"); if(!b) return;
+  b.textContent = soundOn ? "🔔 Alerts on" : "🔕 Alerts off";
+}
+function setBadge(sel, n){
+  const el = $(sel); if(!el || n === null || n === undefined) return;
+  el.textContent = n; el.hidden = !n;
+}
+async function refreshBadges(){
+  if(!db || !currentUser) return;
+  const [r, o] = await Promise.all([
+    db.from("reservations").select("id",{count:"exact",head:true}).eq("status","Pending"),
+    db.from("orders").select("id",{count:"exact",head:true}).eq("status","New")
+  ]);
+  setBadge("#pendingBadge", r.error ? null : r.count);
+  setBadge("#ordersBadge", o.error ? null : o.count);
+}
+function handleNew(kind, row){
+  if(row && row.id){ if(seenIds.has(row.id)) return; seenIds.add(row.id); }
+  const who = (row && row.customer_name) || "a customer";
+  const msg = kind === "reservation"
+    ? `New reservation from ${who}`
+    : `New order from ${who}${row && row.total ? ` — ${fmtNaira(row.total)}` : ""}`;
+  toast(msg, "success", 8000);
+  chime();
+  flashTitle(`🔔 ${msg}`);
+  if("Notification" in window && Notification.permission === "granted" && document.hidden){
+    try{ new Notification("Firefly Café", { body: msg, icon: "images/firefly-logo.jpg" }); }catch(e){}
+  }
+  refreshLive(kind);
+}
+async function refreshLive(kind){
+  refreshBadges();
+  if(currentPage === "dashboard"){ renderDashboard(); return; }
+  if(currentPage === "reservations" && kind === "reservation"){
+    const {data} = await fetchTable("reservations",{order:"reservation_date",ascending:true,limit:500});
+    if(data){ cache.reservations = data; drawReservationTable(); }
+  }
+  if(currentPage === "orders" && kind === "order"){
+    const {data} = await fetchTable("orders",{order:"created_at",limit:500});
+    if(data){ cache.orders = data; drawOrders(); }
+  }
+}
+async function pollNew(silent=false){
+  if(!db || !currentUser) return;
+  // look back 2 minutes to tolerate clock differences; seenIds prevents repeats
+  const since = new Date(new Date(lastPoll).getTime() - 120000).toISOString();
+  lastPoll = new Date().toISOString();
+  const [r, o] = await Promise.all([
+    db.from("reservations").select("id,customer_name,created_at").gt("created_at", since),
+    db.from("orders").select("id,customer_name,total,created_at").gt("created_at", since)
+  ]);
+  const rows = [...(r.data||[]).map(x=>["reservation",x]), ...(o.data||[]).map(x=>["order",x])];
+  if(silent){ rows.forEach(([,x])=>seenIds.add(x.id)); return; }
+  rows.forEach(([k,x])=>handleNew(k,x));
+}
+function startAlerts(){
+  if(!db || alertChannel) return;
+  pollNew(true); // remember what already exists so it doesn't alert on login
+  alertChannel = db.channel("admin-live")
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"reservations"},p=>handleNew("reservation",p.new))
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"orders"},p=>handleNew("order",p.new))
+    .subscribe();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(()=>pollNew(false), 45000);
+}
+function stopAlerts(){
+  clearInterval(pollTimer); pollTimer = null;
+  if(db && alertChannel){ db.removeChannel(alertChannel); }
+  alertChannel = null;
+}
+
 function requireDb(){
   if(!db){ toast("Connect Supabase first in supabase-config.js.", "error"); return false; }
   return true;
@@ -44,6 +156,17 @@ function bindGlobal(){
   });
   $("#logoutButton").addEventListener("click", async()=>{ if(db) await db.auth.signOut(); });
   $("#refreshButton").addEventListener("click", ()=>renderPage(true));
+  document.addEventListener("click", unlockAudio, {once:true});
+  document.addEventListener("keydown", unlockAudio, {once:true});
+  $("#soundButton").addEventListener("click", ()=>{
+    unlockAudio(); soundOn = !soundOn;
+    try{ localStorage.setItem("firefly-admin-sound", soundOn ? "on" : "off"); }catch(e){}
+    updateSoundButton();
+    if(soundOn){
+      chime();
+      if("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+    }
+  });
   $("#openSidebar").addEventListener("click", ()=>{ $("#sidebar").classList.add("open"); $("#mobileScrim").hidden=false; });
   $("#closeSidebar").addEventListener("click", closeMobileNav);
   $("#mobileScrim").addEventListener("click", closeMobileNav);
@@ -59,6 +182,7 @@ async function login(e){
   btn.disabled=false; btn.textContent="Sign in";
 }
 function showLogin(){
+  stopAlerts();
   $("#loginView").hidden=false; $("#appView").hidden=true;
 }
 async function showApp(){
@@ -66,6 +190,8 @@ async function showApp(){
   const email=currentUser?.email || "Admin";
   $("#adminName").textContent=email.split("@")[0];
   $("#adminAvatar").textContent=(email[0]||"A").toUpperCase();
+  updateSoundButton();
+  startAlerts();
   await renderPage();
 }
 function navigate(page){
@@ -80,6 +206,7 @@ async function renderPage(force=false){
   $("#pageTitle").textContent=titles[currentPage] || "Dashboard";
   const view = {dashboard:renderDashboard,reservations:renderReservations,orders:renderOrders,menu:renderMenu,gallery:renderGallery,settings:renderSettings}[currentPage];
   if(view) await view(force);
+  refreshBadges();
 }
 
 async function fetchTable(table, options={}){
@@ -130,7 +257,6 @@ async function renderDashboard(){
   <div style="height:18px"></div>
   <section class="panel"><div class="panel-head"><h3>Today's reservations</h3><button class="mini-button accent" onclick="navigate('reservations')">View all →</button></div>
   ${tableReservations(todayReservations.slice(0,6))}</section>`;
-  $("#pendingBadge").hidden=pending.length===0; $("#pendingBadge").textContent=pending.length;
 }
 function stat(label,value,foot,icon){return `<div class="stat-card"><div class="stat-top"><span>${label}</span><b class="stat-icon">${icon}</b></div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`}
 function tableReservations(rows){

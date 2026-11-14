@@ -51,7 +51,7 @@
       <nav class="nav">
         <button class="nav-item active" data-page="dashboard"><span>⌂</span> Dashboard</button>
         <button class="nav-item" data-page="reservations"><span>▣</span> Reservations <b id="pendingBadge" class="nav-badge" hidden>0</b></button>
-        <button class="nav-item" data-page="orders"><span>◫</span> Orders</button>
+        <button class="nav-item" data-page="orders"><span>◫</span> Orders <b id="ordersBadge" class="nav-badge" hidden>0</b></button>
         <button class="nav-item" data-page="menu"><span>☷</span> Menu</button>
         <button class="nav-item" data-page="gallery"><span>▧</span> Gallery</button>
         <button class="nav-item" data-page="settings"><span>⚙</span> Settings</button>
@@ -78,6 +78,7 @@
           </div>
         </div>
         <div class="topbar-right">
+          <button id="soundButton" class="secondary-button" title="Sound and desktop alerts for new reservations and orders">🔔 Alerts on</button>
           <button id="refreshButton" class="secondary-button">↻ Refresh</button>
           <div class="online-dot"><i></i> Connected</div>
         </div>
