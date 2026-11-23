@@ -1,0 +1,473 @@
+/* Firefly Café Admin — vanilla JS + Supabase */
+const $ = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+const fmtNaira = n => `₦${Number(n || 0).toLocaleString("en-NG")}`;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+const dateOnly = d => d ? new Date(d).toLocaleDateString("en-NG",{day:"numeric",month:"short",year:"numeric"}) : "—";
+const timeOnly = t => t ? String(t).slice(0,5) : "—";
+const localISO = (d=new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+
+let db = window.supabaseClient || null;
+let currentUser = null;
+let currentPage = "dashboard";
+let cache = { reservations: [], orders: [], categories: [], menu: [], gallery: [] };
+
+function toast(message, type="success", ms=3500){
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  $("#toastRoot").appendChild(el);
+  setTimeout(()=>el.remove(), ms);
+}
+/* ---------- Live alerts: new reservations & orders ----------
+   Uses Supabase Realtime (instant) plus a 45-second check as a safety net.
+   Shows a toast, plays a chime, flashes the tab title, sends a desktop
+   notification (if allowed) and keeps the sidebar badges up to date. */
+let alertChannel = null, pollTimer = null, audioCtx = null, titleTimer = null;
+const baseTitle = document.title;
+const seenIds = new Set();
+let lastPoll = new Date().toISOString();
+let soundOn = true;
+try { soundOn = localStorage.getItem("firefly-admin-sound") !== "off"; } catch (e) {}
+
+function unlockAudio(){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if(audioCtx.state === "suspended") audioCtx.resume();
+  }catch(e){}
+}
+function chime(){
+  if(!soundOn || !audioCtx) return;
+  try{
+    [[880,0],[1175,0.18],[1568,0.36]].forEach(([f,t])=>{
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = f; o.connect(g); g.connect(audioCtx.destination);
+      const s = audioCtx.currentTime + t;
+      g.gain.setValueAtTime(0.0001, s);
+      g.gain.exponentialRampToValueAtTime(0.25, s + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, s + 0.4);
+      o.start(s); o.stop(s + 0.45);
+    });
+  }catch(e){}
+}
+function flashTitle(text){
+  clearInterval(titleTimer);
+  if(!document.hidden) return;
+  let on = true;
+  titleTimer = setInterval(()=>{ document.title = on ? text : baseTitle; on = !on; }, 1000);
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(!document.hidden){ clearInterval(titleTimer); document.title = baseTitle; }
+});
+function updateSoundButton(){
+  const b = $("#soundButton"); if(!b) return;
+  b.textContent = soundOn ? "🔔 Alerts on" : "🔕 Alerts off";
+}
+function setBadge(sel, n){
+  const el = $(sel); if(!el || n === null || n === undefined) return;
+  el.textContent = n; el.hidden = !n;
+}
+async function refreshBadges(){
+  if(!db || !currentUser) return;
+  const [r, o] = await Promise.all([
+    db.from("reservations").select("id",{count:"exact",head:true}).eq("status","Pending"),
+    db.from("orders").select("id",{count:"exact",head:true}).eq("status","New")
+  ]);
+  setBadge("#pendingBadge", r.error ? null : r.count);
+  setBadge("#ordersBadge", o.error ? null : o.count);
+}
+function handleNew(kind, row){
+  if(row && row.id){ if(seenIds.has(row.id)) return; seenIds.add(row.id); }
+  const who = (row && row.customer_name) || "a customer";
+  const refText = row && row.ref_code ? ` (${row.ref_code})` : "";
+  const msg = kind === "reservation"
+    ? `New reservation from ${who}${refText}`
+    : `New order from ${who}${row && row.total ? ` — ${fmtNaira(row.total)}` : ""}${refText}`;
+  toast(msg, "success", 8000);
+  chime();
+  flashTitle(`🔔 ${msg}`);
+  if("Notification" in window && Notification.permission === "granted" && document.hidden){
+    try{ new Notification("Firefly Café", { body: msg, icon: "images/firefly-logo.webp" }); }catch(e){}
+  }
+  refreshLive(kind);
+}
+async function refreshLive(kind){
+  refreshBadges();
+  if(currentPage === "dashboard"){ renderDashboard(); return; }
+  if(currentPage === "reservations" && kind === "reservation"){
+    const {data} = await fetchTable("reservations",{order:"reservation_date",ascending:true,limit:500});
+    if(data){ cache.reservations = data; drawReservationTable(); }
+  }
+  if(currentPage === "orders" && kind === "order"){
+    const {data} = await fetchTable("orders",{order:"created_at",limit:500});
+    if(data){ cache.orders = data; drawOrders(); }
+  }
+}
+async function pollNew(silent=false){
+  if(!db || !currentUser) return;
+  // look back 2 minutes to tolerate clock differences; seenIds prevents repeats
+  const since = new Date(new Date(lastPoll).getTime() - 120000).toISOString();
+  lastPoll = new Date().toISOString();
+  const [r, o] = await Promise.all([
+    db.from("reservations").select("id,customer_name,created_at").gt("created_at", since),
+    db.from("orders").select("id,customer_name,total,created_at").gt("created_at", since)
+  ]);
+  const rows = [...(r.data||[]).map(x=>["reservation",x]), ...(o.data||[]).map(x=>["order",x])];
+  if(silent){ rows.forEach(([,x])=>seenIds.add(x.id)); return; }
+  rows.forEach(([k,x])=>handleNew(k,x));
+}
+function startAlerts(){
+  if(!db || alertChannel) return;
+  pollNew(true); // remember what already exists so it doesn't alert on login
+  alertChannel = db.channel("admin-live")
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"reservations"},p=>handleNew("reservation",p.new))
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"orders"},p=>handleNew("order",p.new))
+    .subscribe();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(()=>pollNew(false), 45000);
+}
+function stopAlerts(){
+  clearInterval(pollTimer); pollTimer = null;
+  if(db && alertChannel){ db.removeChannel(alertChannel); }
+  alertChannel = null;
+}
+
+/* ---------- WhatsApp match: has the customer's message actually arrived? ----------
+   Every booking carries a Ref code that is also written in the WhatsApp message.
+   Pending/New entries with no confirmed message after 30 minutes are flagged. */
+const NO_MESSAGE_AFTER_MS = 30 * 60 * 1000;
+function waState(x){
+  if(!["Pending","New"].includes(x.status)) return null;
+  if(x.wa_received) return {cls:"done",label:"✓ Message received",ghost:false};
+  const age = Date.now() - new Date(x.created_at).getTime();
+  if(age < NO_MESSAGE_AFTER_MS) return {cls:"pending",label:"Waiting for WhatsApp…",ghost:false};
+  return {cls:"cancelled",label:"No message yet",ghost:true};
+}
+function waBadge(x){ const s=waState(x); return s?`<div style="margin-top:5px"><span class="status ${s.cls}">${s.label}</span></div>`:""; }
+function refTag(x){ return x.ref_code?`<small class="muted" style="display:block">Ref ${esc(x.ref_code)}</small>`:""; }
+function receivedBtn(table,x){ return waState(x)?`<button class="mini-button" onclick='toggleReceived("${table}",${JSON.stringify(x.id)},${!!x.wa_received})'>${x.wa_received?"Unmark":"Mark received"}</button>`:""; }
+async function toggleReceived(table,id,current){
+  if(!requireDb())return;
+  const {error}=await db.from(table).update({wa_received:!current,updated_at:new Date().toISOString()}).eq("id",id);
+  if(error){toast(error.message,"error");return}
+  const list=table==="reservations"?cache.reservations:cache.orders;
+  const row=list.find(r=>String(r.id)===String(id)); if(row) row.wa_received=!current;
+  if(table==="reservations") drawReservationTable(); else drawOrders();
+  toast(!current?"Marked as received.":"Marked as not received.");
+}
+
+function requireDb(){
+  if(!db){ toast("Connect Supabase first in supabase-config.js.", "error"); return false; }
+  return true;
+}
+function statusClass(v){ return String(v || "").toLowerCase().replace(/\s+/g,"-"); }
+function statusBadge(v){ return `<span class="status ${statusClass(v)}">${esc(v || "—")}</span>`; }
+
+async function init(){
+  bindGlobal();
+  if(!db){ showLogin(); $("#loginError").hidden=false; $("#loginError").textContent="Supabase is not connected. Add your project URL and publishable key in supabase-config.js."; return; }
+  const {data:{session}} = await db.auth.getSession();
+  if(session){ currentUser=session.user; await showApp(); }
+  else showLogin();
+  db.auth.onAuthStateChange(async (_event, session)=>{
+    currentUser=session?.user || null;
+    if(currentUser) await showApp(); else showLogin();
+  });
+}
+function bindGlobal(){
+  $("#loginForm").addEventListener("submit", login);
+  $("#togglePassword").addEventListener("click", ()=>{
+    const p=$("#loginPassword"); const on=p.type==="text"; p.type=on?"password":"text"; $("#togglePassword").textContent=on?"Show":"Hide";
+  });
+  $("#logoutButton").addEventListener("click", async()=>{ if(db) await db.auth.signOut(); });
+  $("#refreshButton").addEventListener("click", ()=>renderPage(true));
+  document.addEventListener("click", unlockAudio, {once:true});
+  document.addEventListener("keydown", unlockAudio, {once:true});
+  $("#soundButton").addEventListener("click", ()=>{
+    unlockAudio(); soundOn = !soundOn;
+    try{ localStorage.setItem("firefly-admin-sound", soundOn ? "on" : "off"); }catch(e){}
+    updateSoundButton();
+    if(soundOn){
+      chime();
+      if("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+    }
+  });
+  $("#openSidebar").addEventListener("click", ()=>{ $("#sidebar").classList.add("open"); $("#mobileScrim").hidden=false; });
+  $("#closeSidebar").addEventListener("click", closeMobileNav);
+  $("#mobileScrim").addEventListener("click", closeMobileNav);
+  $$(".nav-item").forEach(b=>b.addEventListener("click",()=>navigate(b.dataset.page)));
+}
+function closeMobileNav(){ $("#sidebar").classList.remove("open"); $("#mobileScrim").hidden=true; }
+async function login(e){
+  e.preventDefault();
+  if(!requireDb()) return;
+  const btn=$("#loginButton"); const err=$("#loginError"); err.hidden=true; btn.disabled=true; btn.textContent="Signing in…";
+  const {error}=await db.auth.signInWithPassword({email:$("#loginEmail").value.trim(),password:$("#loginPassword").value});
+  if(error){ err.hidden=false; err.textContent=error.message.includes("Invalid login credentials")?"Email or password is incorrect.":error.message; }
+  btn.disabled=false; btn.textContent="Sign in";
+}
+function showLogin(){
+  stopAlerts();
+  $("#loginView").hidden=false; $("#appView").hidden=true;
+}
+async function showApp(){
+  $("#loginView").hidden=true; $("#appView").hidden=false;
+  const email=currentUser?.email || "Admin";
+  $("#adminName").textContent=email.split("@")[0];
+  $("#adminAvatar").textContent=(email[0]||"A").toUpperCase();
+  updateSoundButton();
+  startAlerts();
+  await renderPage();
+}
+function navigate(page){
+  currentPage=page;
+  $$(".nav-item").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
+  closeMobileNav();
+  renderPage();
+}
+async function renderPage(force=false){
+  if(!currentUser) return;
+  const titles={dashboard:"Dashboard",reservations:"Reservations",orders:"Orders",menu:"Menu",gallery:"Gallery",settings:"Site Settings"};
+  $("#pageTitle").textContent=titles[currentPage] || "Dashboard";
+  const view = {dashboard:renderDashboard,reservations:renderReservations,orders:renderOrders,menu:renderMenu,gallery:renderGallery,settings:renderSettings}[currentPage];
+  if(view) await view(force);
+  refreshBadges();
+}
+
+async function fetchTable(table, options={}){
+  if(!db) return {data:[],error:null};
+  let q=db.from(table).select(options.select || "*");
+  if(options.order) q=q.order(options.order,{ascending:options.ascending ?? false});
+  if(options.limit) q=q.limit(options.limit);
+  return q;
+}
+async function renderDashboard(){
+  const root=$("#pageContent");
+  root.innerHTML=`<div class="welcome"><div><div class="eyebrow">OVERVIEW</div><h1 id="greeting">Welcome back 👋</h1><div class="date-text">${new Date().toLocaleDateString("en-NG",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div></div></div><div id="dashLoading" class="panel empty">Loading dashboard…</div>`;
+  const today=new Date(); const y=today.getFullYear(),m=String(today.getMonth()+1).padStart(2,"0"),d=String(today.getDate()).padStart(2,"0"), todayStr=`${y}-${m}-${d}`;
+  const [r,o,mi,act]=await Promise.all([
+    fetchTable("reservations",{order:"created_at",limit:100}),
+    fetchTable("orders",{order:"created_at",limit:100}),
+    fetchTable("menu_items",{order:"created_at",limit:500}),
+    fetchTable("reservations",{order:"created_at",limit:5})
+  ]);
+  const reservations=r.data||[], orders=o.data||[], menu=mi.data||[];
+  cache.reservations=reservations; cache.orders=orders; cache.menu=menu;
+  const todayReservations=reservations.filter(x=>x.reservation_date===todayStr);
+  const pending=reservations.filter(x=>x.status==="Pending");
+  const todayOrders=orders.filter(x=>x.created_at&&localISO(new Date(x.created_at))===todayStr);
+  const revenue=todayOrders.reduce((s,x)=>s+Number(x.total||0),0);
+  const available=menu.filter(x=>x.available!==false).length, sold=menu.filter(x=>x.available===false).length;
+  const ghosts=[...reservations.filter(x=>x.status==="Pending"),...orders.filter(x=>x.status==="New")].filter(x=>waState(x)?.ghost).length;
+  const recent=[...reservations].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,5);
+  const greet=new Date().getHours()<12?"Good morning":new Date().getHours()<17?"Good afternoon":"Good evening";
+  root.innerHTML=`<div class="welcome"><div><div class="eyebrow">OVERVIEW</div><h1>${greet}, Admin 👋</h1><div class="date-text">${new Date().toLocaleDateString("en-NG",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</div></div></div>
+  <div class="stats">
+    ${stat("Today's Reservations",todayReservations.length,"Today","▣")}
+    ${stat("Pending Reservations",pending.length,"Need attention","!")}
+    ${stat("Today's Orders",todayOrders.length,"Recorded today","◫")}
+    ${stat("Today's Revenue",fmtNaira(revenue),"Recorded orders","₦")}
+    ${stat("Available Menu",available,"Currently available","✓")}
+    ${stat("Sold Out",sold,"Currently unavailable","×")}
+  </div>
+  <div class="grid-2">
+    <section class="panel"><div class="panel-head"><h3>Needs attention</h3><small>Quick actions</small></div><div class="attention">
+      ${pending.length?`<div class="attention-item"><div><strong>${pending.length} pending reservation${pending.length===1?"":"s"}</strong><span>Review customer bookings</span></div><button onclick="navigate('reservations')">Review →</button></div>`:`<div class="attention-item"><div><strong>No pending reservations</strong><span>You're all caught up.</span></div></div>`}
+      ${ghosts?`<div class="attention-item"><div><strong>${ghosts} booking${ghosts===1?"":"s"} with no WhatsApp message yet</strong><span>The customer may not have tapped send. Check before preparing.</span></div><button onclick="navigate('reservations')">Check →</button></div>`:""}
+      ${sold?`<div class="attention-item"><div><strong>${sold} menu item${sold===1?"":"s"} sold out</strong><span>Update availability when ready.</span></div><button onclick="navigate('menu')">Menu →</button></div>`:""}
+      ${todayOrders.length?`<div class="attention-item"><div><strong>${todayOrders.length} order${todayOrders.length===1?"":"s"} today</strong><span>Check current order status.</span></div><button onclick="navigate('orders')">Orders →</button></div>`:""}
+    </div></section>
+    <section class="panel"><div class="panel-head"><h3>Recent activity</h3><small>Latest reservations</small></div>
+      ${recent.length?recent.map(x=>`<div class="activity"><i class="activity-dot"></i><div><strong>Reservation from ${esc(x.customer_name)}</strong><span>${dateOnly(x.created_at)} · ${statusBadge(x.status)}</span></div></div>`).join(""):`<div class="empty">No recent activity.</div>`}
+    </section>
+  </div>
+  <div style="height:18px"></div>
+  <section class="panel"><div class="panel-head"><h3>Today's reservations</h3><button class="mini-button accent" onclick="navigate('reservations')">View all →</button></div>
+  ${tableReservations(todayReservations.slice(0,6))}</section>`;
+}
+function stat(label,value,foot,icon){return `<div class="stat-card"><div class="stat-top"><span>${label}</span><b class="stat-icon">${icon}</b></div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`}
+function tableReservations(rows){
+  if(!rows.length)return `<div class="empty">No reservations for this view.</div>`;
+  return `<div class="table-wrap"><table class="table"><thead><tr><th>Customer</th><th>Time</th><th>Guests</th><th>Status</th><th>Phone</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td><strong>${esc(x.customer_name)}</strong></td><td>${timeOnly(x.reservation_time)}</td><td>${esc(x.guests)}</td><td>${statusBadge(x.status)}</td><td>${esc(x.phone)}</td><td><button class="mini-button" onclick='viewReservation(${JSON.stringify(x.id)})'>View</button></td></tr>`).join("")}</tbody></table></div>`;
+}
+
+async function renderReservations(){
+  const root=$("#pageContent"); root.innerHTML=`<div class="page-header"><div><div class="eyebrow">BOOKINGS</div><h1>Reservations</h1><p>Manage customer bookings and follow-ups.</p></div><button class="primary-button" onclick="openReservationModal()">+ Add reservation</button></div>
+  <div class="toolbar"><input id="reservationSearch" placeholder="Search name, phone or ref…"><select id="reservationFilter"><option>All</option><option>Today</option><option>Upcoming</option><option>Past</option><option>Pending</option><option>Confirmed</option><option>Cancelled</option><option>No-show</option></select></div>
+  <section class="panel" id="reservationPanel"><div class="empty">Loading reservations…</div></section>`;
+  const {data,error}=await fetchTable("reservations",{order:"reservation_date",ascending:true,limit:500});
+  if(error){ $("#reservationPanel").innerHTML=`<div class="empty">Could not load reservations.<br>${esc(error.message)}</div>`; return; }
+  cache.reservations=data||[]; bindReservationFilters(); drawReservationTable();
+}
+function bindReservationFilters(){ $("#reservationSearch").addEventListener("input",drawReservationTable); $("#reservationFilter").addEventListener("change",drawReservationTable); }
+function drawReservationTable(){
+  const q=($("#reservationSearch")?.value||"").toLowerCase(), filter=$("#reservationFilter")?.value||"All"; const today=localISO();
+  let rows=cache.reservations.filter(x=>`${x.customer_name} ${x.phone} ${x.ref_code||""}`.toLowerCase().includes(q));
+  rows=rows.filter(x=>{
+    if(filter==="All")return true;if(filter==="Today")return x.reservation_date===today;if(filter==="Upcoming")return x.reservation_date>=today&&!["Cancelled","No-show"].includes(x.status);if(filter==="Past")return x.reservation_date<today;return x.status===filter;
+  });
+  $("#reservationPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Customer</th><th>Phone</th><th>Date</th><th>Time</th><th>Guests</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows.map(x=>`<tr class="${waState(x)?.ghost?"unreceived":""}"><td><strong>${esc(x.customer_name)}</strong>${refTag(x)}<small class="muted">${esc(x.notes||"")}</small>${waBadge(x)}</td><td>${esc(x.phone)}</td><td>${dateOnly(x.reservation_date)}</td><td>${timeOnly(x.reservation_time)}</td><td>${esc(x.guests)}</td><td>${statusBadge(x.status)}</td><td><div class="row-actions"><button class="mini-button" onclick='viewReservation(${JSON.stringify(x.id)})'>View</button><a class="mini-button" href="tel:${esc(x.phone)}">Call</a><a class="mini-button accent" target="_blank" href="${waLink(x)}">WhatsApp</a>${receivedBtn("reservations",x)}</div></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No reservations found.</div>`;
+}
+function waLink(x){ const n=String(x.phone||"").replace(/\D/g,"").replace(/^0/,"234"); const msg=encodeURIComponent(`Hello ${x.customer_name}, this is Firefly Café regarding your reservation for ${x.reservation_date} at ${timeOnly(x.reservation_time)}.`); return `https://wa.me/${n}?text=${msg}`; }
+function viewReservation(id){
+  const x=cache.reservations.find(r=>String(r.id)===String(id)); if(!x)return;
+  openModal("Reservation details",`<div class="form-grid">
+    <div><label>Customer<input value="${esc(x.customer_name)}" disabled></label></div><div><label>Phone<input value="${esc(x.phone)}" disabled></label></div>
+    <div><label>Date<input value="${dateOnly(x.reservation_date)}" disabled></label></div><div><label>Time<input value="${timeOnly(x.reservation_time)}" disabled></label></div>
+    <div><label>Guests<input value="${esc(x.guests)}" disabled></label></div><div><label>Status<select id="modalStatus"><option ${x.status==="Pending"?"selected":""}>Pending</option><option ${x.status==="Confirmed"?"selected":""}>Confirmed</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option><option ${x.status==="No-show"?"selected":""}>No-show</option></select></label></div>
+    <div class="full-col"><label>Internal notes<textarea id="modalNotes">${esc(x.notes||"")}</textarea></label></div>
+  </div>`,[
+    {text:"Delete",class:"danger-button",action:()=>deleteRow("reservations",x.id,`the reservation for ${x.customer_name}`,()=>renderPage(true))},{text:"Close",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:async()=>{await updateReservation(x.id,$("#modalStatus").value,$("#modalNotes").value)}}
+  ]);
+}
+async function updateReservation(id,status,notes){
+  if(!requireDb())return; const {error}=await db.from("reservations").update({status,notes,...(status==="Confirmed"?{wa_received:true}:{}),updated_at:new Date().toISOString()}).eq("id",id);
+  if(error){toast(error.message,"error");return} closeModal();toast("Reservation updated.");await renderPage(true);
+}
+function openReservationModal(){
+  openModal("Add reservation",`<div class="form-grid">
+    <div><label>Customer name<input id="rName" required></label></div><div><label>Phone<input id="rPhone" required></label></div>
+    <div><label>Date<input id="rDate" type="date" required></label></div><div><label>Time<input id="rTime" type="time" required></label></div>
+    <div><label>Guests<input id="rGuests" type="number" min="1" value="2" required></label></div>
+    <div class="full-col"><label>Notes<textarea id="rNotes"></textarea></label></div>
+  </div>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Create",class:"primary-button",action:createReservation}]);
+}
+async function createReservation(){
+  const payload={customer_name:$("#rName").value.trim(),phone:$("#rPhone").value.trim(),reservation_date:$("#rDate").value,reservation_time:$("#rTime").value,guests:Number($("#rGuests").value),status:"Pending",notes:$("#rNotes").value.trim()};
+  if(!payload.customer_name||!payload.phone||!payload.reservation_date||!payload.reservation_time){toast("Please complete the required fields.","error");return}
+  const {error}=await db.from("reservations").insert(payload);if(error){toast(error.message,"error");return}closeModal();toast("Reservation created.");await renderPage(true);
+}
+
+async function renderMenu(){
+  const root=$("#pageContent"); root.innerHTML=`<div class="page-header"><div><div class="eyebrow">FOOD & DRINK</div><h1>Menu</h1><p>Manage prices, availability and featured dishes.</p></div><button class="primary-button" onclick="openMenuModal()">+ Add item</button></div><div class="toolbar"><input id="menuSearch" placeholder="Search menu item…"><button class="secondary-button" onclick="openCategoryModal()">+ Category</button></div><div id="menuRoot"><div class="panel empty">Loading menu…</div></div>`;
+  const [c,m]=await Promise.all([fetchTable("menu_categories",{order:"display_order",ascending:true}),fetchTable("menu_items",{order:"display_order",ascending:true})]);
+  if(c.error||m.error){$("#menuRoot").innerHTML=`<div class="panel empty">Could not load menu. Check your Supabase tables and policies.</div>`;return}
+  cache.categories=c.data||[];cache.menu=m.data||[];$("#menuSearch").addEventListener("input",drawMenu);drawMenu();
+}
+function drawMenu(){
+  const q=($("#menuSearch")?.value||"").toLowerCase(); const root=$("#menuRoot");
+  root.innerHTML=cache.categories.map(cat=>{
+    const items=cache.menu.filter(x=>String(x.category_id)===String(cat.id)&&`${x.name} ${x.description||""}`.toLowerCase().includes(q));
+    return `<section class="panel menu-group"><div class="menu-group-head"><h3>${esc(cat.name)}</h3><div class="row-actions"><button class="mini-button" title="Move up" onclick='moveCategory(${JSON.stringify(cat.id)},-1)'>↑</button><button class="mini-button" title="Move down" onclick='moveCategory(${JSON.stringify(cat.id)},1)'>↓</button><button class="mini-button" onclick='openCategoryModal(${JSON.stringify(cat.id)})'>Rename</button><button class="mini-button danger" onclick='deleteCategory(${JSON.stringify(cat.id)})'>Delete</button><button class="mini-button accent" onclick='openMenuModal(null,${JSON.stringify(cat.id)})'>+ Item</button></div></div><div class="menu-items">${items.length?items.map(item=>`<div class="menu-item"><div><strong>${esc(item.name)}</strong><small>${esc(item.description||"")}</small>${item.image_url?`<span class="status done" style="margin-top:6px">In Taste of Firefly</span>`:""}</div><div><div class="price">${fmtNaira(item.price)}</div><div style="margin-top:6px">${statusBadge(item.available===false?"Sold Out":"Available")}</div></div><div class="row-actions"><button class="toggle ${item.available!==false?"on":""}" title="Toggle availability" onclick='toggleMenu(${JSON.stringify(item.id)},${item.available!==false})'><i></i></button><button class="mini-button" onclick='openMenuModal(${JSON.stringify(item.id)})'>Edit</button></div></div>`).join(""):`<div class="empty">No items in this category.</div>`}</div></section>`;
+  }).join("") || `<div class="panel empty">No categories yet. Add a category to start.</div>`;
+}
+async function toggleMenu(id,isAvailable){
+  const {error}=await db.from("menu_items").update({available:!isAvailable,updated_at:new Date().toISOString()}).eq("id",id);
+  if(error){toast(error.message,"error");return}toast(!isAvailable?"Item marked available.":"Item marked sold out.");await renderMenu();
+}
+function openMenuModal(id=null,categoryId=null){
+  const item=id?cache.menu.find(x=>String(x.id)===String(id)):null;
+  const cats=cache.categories.map(c=>`<option value="${c.id}" ${String(item?.category_id||categoryId)===String(c.id)?"selected":""}>${esc(c.name)}</option>`).join("");
+  openModal(item?"Edit menu item":"Add menu item",`<div class="form-grid">
+    <div class="full-col"><label>Name<input id="mName" value="${esc(item?.name||"")}"></label></div>
+    <div><label>Category<select id="mCategory">${cats}</select></label></div><div><label>Price (₦)<input id="mPrice" type="number" min="0" value="${item?.price??""}"></label></div>
+    <div class="full-col"><label>Description<textarea id="mDesc">${esc(item?.description||"")}</textarea></label></div><div class="full-col"><label>Photo (optional)<input id="mImage" value="${esc(item?.image_url||"")}" placeholder="images/platter.webp or https://…"><small class="muted" style="display:block;margin-top:6px;font-size:.68rem">Items with a photo appear in “A Taste of Firefly” on the menu page. Leave empty to keep an item out of it.</small></label></div>
+    <div><label>Available<select id="mAvailable"><option value="true" ${item?.available!==false?"selected":""}>Available</option><option value="false" ${item?.available===false?"selected":""}>Sold Out</option></select></label></div>
+    <div><label>Featured<select id="mFeatured"><option value="false" ${!item?.featured?"selected":""}>No</option><option value="true" ${item?.featured?"selected":""}>Yes</option></select></label></div>
+  </div>`,[...(item?[{text:"Delete",class:"danger-button",action:()=>deleteRow("menu_items",item.id,`"${item.name}"`,renderMenu)}]:[]),{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:()=>saveMenu(item?.id)}]);
+}
+async function saveMenu(id){
+  const payload={name:$("#mName").value.trim(),category_id:$("#mCategory").value,price:Number($("#mPrice").value),description:$("#mDesc").value.trim(),image_url:$("#mImage").value.trim()||null,available:$("#mAvailable").value==="true",featured:$("#mFeatured").value==="true",updated_at:new Date().toISOString()};
+  if(!payload.name||$("#mPrice").value===""||!Number.isFinite(payload.price)){toast("Name and price are required.","error");return}
+  const q=id?db.from("menu_items").update(payload).eq("id",id):db.from("menu_items").insert({...payload,display_order:cache.menu.length});
+  const {error}=await q;if(error){toast(error.message,"error");return}closeModal();toast(id?"Menu item updated.":"Menu item added.");await renderMenu();
+}
+function openCategoryModal(id=null){
+  const c=id?cache.categories.find(x=>String(x.id)===String(id)):null;
+  openModal(c?"Edit category":"Add category",`<label>Category name<input id="catName" value="${esc(c?.name||"")}"></label><label>Description<textarea id="catDesc">${esc(c?.description||"")}</textarea></label>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:()=>saveCategory(c?.id)}]);
+}
+async function saveCategory(id){
+  const name=$("#catName").value.trim();if(!name){toast("Category name is required.","error");return}
+  const body={name,description:$("#catDesc").value.trim()};
+  const {error}=id?await db.from("menu_categories").update({...body,updated_at:new Date().toISOString()}).eq("id",id):await db.from("menu_categories").insert({...body,display_order:cache.categories.length});
+  if(error){toast(error.message,"error");return}closeModal();toast(id?"Category updated.":"Category added.");await renderMenu();
+}
+async function moveCategory(id,dir){
+  if(!requireDb())return;
+  const cats=[...cache.categories].sort((a,b)=>a.display_order-b.display_order);
+  const i=cats.findIndex(c=>String(c.id)===String(id)),k=i+dir;
+  if(i<0||k<0||k>=cats.length)return;
+  const order=cats.map((c,n)=>({id:c.id,display_order:n}));
+  [order[i].display_order,order[k].display_order]=[order[k].display_order,order[i].display_order];
+  const res=await Promise.all(order.map(r=>db.from("menu_categories").update({display_order:r.display_order}).eq("id",r.id)));
+  const bad=res.find(r=>r.error);if(bad){toast(bad.error.message,"error");return}
+  await renderMenu();
+}
+async function deleteCategory(id){
+  const n=cache.menu.filter(x=>String(x.category_id)===String(id)).length;
+  if(n){toast(`This category still has ${n} item${n===1?"":"s"}. Delete or move them first.`,"error");return}
+  const c=cache.categories.find(x=>String(x.id)===String(id));
+  await deleteRow("menu_categories",id,`the category "${c?.name||""}"`,renderMenu);
+}
+async function deleteRow(table,id,label,after){
+  if(!requireDb())return;
+  if(!confirm(`Delete ${label}? This can't be undone.`))return;
+  const {error}=await db.from(table).delete().eq("id",id);
+  if(error){toast(error.message,"error");return}
+  closeModal();toast("Deleted.");await after();
+}
+
+async function renderOrders(){
+  const root=$("#pageContent");root.innerHTML=`<div class="page-header"><div><div class="eyebrow">CUSTOMER ORDERS</div><h1>Orders</h1><p>Track orders recorded before the WhatsApp handoff.</p></div></div><div class="toolbar"><input id="orderSearch" placeholder="Search ref, order or customer…"><select id="orderFilter"><option>All</option><option>New</option><option>Preparing</option><option>Done</option><option>Cancelled</option></select></div><section class="panel" id="orderPanel"><div class="empty">Loading orders…</div></section>`;
+  const {data,error}=await fetchTable("orders",{order:"created_at",limit:500});if(error){$("#orderPanel").innerHTML=`<div class="empty">Could not load orders. ${esc(error.message)}</div>`;return}
+  cache.orders=data||[];bindOrderFilters();drawOrders();
+}
+function bindOrderFilters(){$("#orderSearch").addEventListener("input",drawOrders);$("#orderFilter").addEventListener("change",drawOrders)}
+function drawOrders(){
+  const q=($("#orderSearch")?.value||"").toLowerCase(), f=$("#orderFilter")?.value||"All";
+  const rows=cache.orders.filter(x=>`${x.id} ${x.customer_name} ${x.phone} ${x.ref_code||""}`.toLowerCase().includes(q)&& (f==="All"||x.status===f));
+  $("#orderPanel").innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Type</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr class="${waState(x)?.ghost?"unreceived":""}"><td><strong>${x.ref_code?esc(x.ref_code):"#"+esc(String(x.id).slice(0,8))}</strong>${waBadge(x)}</td><td>${esc(x.customer_name||"—")}<small class="muted">${esc(x.phone||"")}</small></td><td>${fmtNaira(x.total)}</td><td>${esc(x.order_type||"—")}</td><td>${statusBadge(x.status)}</td><td>${dateOnly(x.created_at)}</td><td><div class="row-actions"><button class="mini-button" onclick='viewOrder(${JSON.stringify(x.id)})'>View</button>${receivedBtn("orders",x)}</div></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No orders found.</div>`;
+}
+async function viewOrder(id){
+  const x=cache.orders.find(o=>String(o.id)===String(id));if(!x)return;
+  let items=[];if(db){const r=await db.from("order_items").select("*").eq("order_id",id);items=r.data||[]}
+  openModal("Order details",`<div class="form-grid"><div><label>Customer<input value="${esc(x.customer_name||"—")}" disabled></label></div><div><label>Phone<input value="${esc(x.phone||"—")}" disabled></label></div><div><label>Total<input value="${fmtNaira(x.total)}" disabled></label></div><div><label>Status<select id="orderStatus"><option ${x.status==="New"?"selected":""}>New</option><option ${x.status==="Preparing"?"selected":""}>Preparing</option><option ${x.status==="Done"?"selected":""}>Done</option><option ${x.status==="Cancelled"?"selected":""}>Cancelled</option></select></label></div>${x.notes?`<div class="full-col"><label>Notes<input value="${esc(x.notes)}" disabled></label></div>`:""}<div class="full-col"><label>Items<textarea disabled>${items.map(i=>`${i.quantity} × ${i.item_name} — ${fmtNaira(i.subtotal)}`).join("\n")||"No item details saved."}</textarea></label></div></div>`,[{text:"Close",class:"secondary-button",action:closeModal},{text:"Save status",class:"primary-button",action:async()=>{const {error}=await db.from("orders").update({status:$("#orderStatus").value,...(["Preparing","Done"].includes($("#orderStatus").value)?{wa_received:true}:{}),updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}closeModal();toast("Order updated.");await renderOrders();}}]);
+}
+
+async function renderGallery(){
+  const root=$("#pageContent");root.innerHTML=`<div class="page-header"><div><div class="eyebrow">VISUAL CONTENT</div><h1>Gallery</h1><p>Keep the café's gallery and slideshow organized.</p></div><button class="primary-button" onclick="openGalleryModal()">+ Add image</button></div><section class="panel" id="galleryPanel"><div class="empty">Loading gallery…</div></section>`;
+  const {data,error}=await fetchTable("gallery",{order:"display_order",ascending:true});if(error){$("#galleryPanel").innerHTML=`<div class="empty">Could not load gallery. ${esc(error.message)}</div>`;return}
+  cache.gallery=data||[];drawGallery();
+}
+function drawGallery(){
+  $("#galleryPanel").innerHTML=cache.gallery.length?`<div class="gallery-grid">${cache.gallery.map(x=>`<article class="gallery-card"><img src="${esc(x.image_url)}" alt="${esc(x.caption||"Firefly Café")}"><div class="gallery-info"><strong>${esc(x.caption||"Untitled")}</strong><small>${esc(x.category||"Uncategorized")}</small><div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 8px">${x.show_in_gallery?`<span class="status done">Gallery</span>`:""}${x.show_in_slideshow?`<span class="status preparing">Background</span>`:""}${!x.show_in_gallery&&!x.show_in_slideshow?`<span class="status cancelled">Hidden</span>`:""}</div><div class="row-actions"><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"gallery",${!!x.show_in_gallery})'>${x.show_in_gallery?"Remove from gallery":"Add to gallery"}</button><button class="mini-button" onclick='toggleGallery(${JSON.stringify(x.id)},"slideshow",${!!x.show_in_slideshow})'>${x.show_in_slideshow?"Remove from background":"Use as background"}</button><button class="mini-button danger" onclick='deleteRow("gallery",${JSON.stringify(x.id)},"this image",renderGallery)'>Delete</button></div></div></article>`).join("")}</div>`:`<div class="empty">No gallery images yet. Add an image record to begin.</div>`;
+}
+async function toggleGallery(id,type,current){
+  const field=type==="gallery"?"show_in_gallery":"show_in_slideshow";const {error}=await db.from("gallery").update({[field]:!current,updated_at:new Date().toISOString()}).eq("id",id);if(error){toast(error.message,"error");return}toast("Gallery updated.");await renderGallery();
+}
+function openGalleryModal(){
+  openModal("Add gallery image",`<p class="muted" style="font-size:.75rem">This simple version stores an image URL. You can upgrade it to Supabase Storage uploads after the core dashboard is working.</p><label>Image URL or path<input id="gUrl" placeholder="images/backgrounds/coffee.webp or https://…"></label><label>Caption<input id="gCaption"></label><label>Category<select id="gCategory"><option>Food</option><option>People</option><option>Interior</option><option>Vibe</option></select></label><label>Show in the Gallery section<select id="gInGallery"><option value="true">Yes</option><option value="false">No</option></select></label><label>Use as a background slideshow image<select id="gInSlideshow"><option value="false">No</option><option value="true">Yes</option></select><small class="muted" style="display:block;margin-top:6px;font-size:.68rem">Tip: keep background-only photos in images/backgrounds and gallery photos in images/gallery.</small></label>`,[{text:"Cancel",class:"secondary-button",action:closeModal},{text:"Save",class:"primary-button",action:saveGallery}]);
+}
+async function saveGallery(){
+  const image_url=$("#gUrl").value.trim();if(!image_url){toast("Image URL is required.","error");return}
+  if($("#gInGallery").value!=="true"&&$("#gInSlideshow").value!=="true"){toast("Choose at least one place for this image to appear.","error");return}
+  const {error}=await db.from("gallery").insert({image_url,caption:$("#gCaption").value.trim(),category:$("#gCategory").value,display_order:cache.gallery.length,show_in_gallery:$("#gInGallery").value==="true",show_in_slideshow:$("#gInSlideshow").value==="true"});
+  if(error){toast(error.message,"error");return}closeModal();toast("Gallery image added.");await renderGallery();
+}
+
+async function renderSettings(){
+  const root=$("#pageContent");root.innerHTML=`<div class="page-header"><div><div class="eyebrow">BUSINESS INFO</div><h1>Site Settings</h1><p>Update information that should not require code edits.</p></div><button class="primary-button" onclick="saveSettings()">Save settings</button></div><div class="settings-grid"><section class="panel setting-section"><h3>Contact</h3><p>Public contact details used by the website.</p><label>WhatsApp number<input id="sWhatsApp"></label><label>Phone number<input id="sPhone"></label><label>Address<input id="sAddress"></label><label>Google Maps link<input id="sMaps"></label></section><section class="panel setting-section"><h3>Announcement</h3><p>Optional message shown on the customer website.</p><label>Message<textarea id="sAnnouncement"></textarea></label><label>Banner status<select id="sBanner"><option value="true">Enabled</option><option value="false">Disabled</option></select></label><h3 style="margin-top:25px">Opening hours</h3><div id="hours"></div></section></div>`;
+  const {data,error}=await db.from("site_settings").select("*").limit(1).maybeSingle();
+  if(error && error.code!=="PGRST116"){toast(error.message,"error");return}
+  const s=data||{};$("#sWhatsApp").value=s.whatsapp_number||"";$("#sPhone").value=s.phone_number||"";$("#sAddress").value=s.address||"";$("#sMaps").value=s.google_maps_link||"";$("#sAnnouncement").value=s.announcement||"";$("#sBanner").value=String(s.announcement_enabled??false);
+  const {data:hours}=await db.from("opening_hours").select("*").order("day_index");const days=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+  $("#hours").innerHTML=days.map((day,i)=>{const h=(hours||[]).find(x=>Number(x.day_index)===i)||{};return `<div class="hours-row"><span>${day}</span><select data-day="${i}" class="hOpen"><option value="true" ${h.is_open!==false?"selected":""}>Open</option><option value="false" ${h.is_open===false?"selected":""}>Closed</option></select><input class="hStart" data-day="${i}" type="time" value="${h.open_time||"10:00"}"><input class="hEnd" data-day="${i}" type="time" value="${h.close_time||"22:00"}"></div>`}).join("");
+}
+async function saveSettings(){
+  const payload={id:1,whatsapp_number:$("#sWhatsApp").value.trim(),phone_number:$("#sPhone").value.trim(),address:$("#sAddress").value.trim(),google_maps_link:$("#sMaps").value.trim(),announcement:$("#sAnnouncement").value.trim(),announcement_enabled:$("#sBanner").value==="true",updated_at:new Date().toISOString()};
+  const {error}=await db.from("site_settings").upsert(payload,{onConflict:"id"});if(error){toast(error.message,"error");return}
+  const rows=$$(".hOpen").map((el,i)=>({day_index:i,is_open:el.value==="true",open_time:$(`.hStart[data-day="${i}"]`).value,close_time:$(`.hEnd[data-day="${i}"]`).value,updated_at:new Date().toISOString()}));
+  const hr=await db.from("opening_hours").upsert(rows,{onConflict:"day_index"});if(hr.error){toast(hr.error.message,"error");return}
+  toast("Settings saved.");
+}
+
+function openModal(title,body,actions=[]){
+  $("#modalRoot").innerHTML=`<div class="modal-backdrop" id="modalBackdrop"><div class="modal" role="dialog" aria-modal="true"><div class="modal-head"><h3>${title}</h3><button class="icon-button" onclick="closeModal()">×</button></div><div class="modal-body">${body}</div><div class="modal-foot">${actions.map((a,i)=>`<button class="${a.class}" id="modalAction${i}">${a.text}</button>`).join("")}</div></div></div>`;
+  actions.forEach((a,i)=>$(`#modalAction${i}`).addEventListener("click",a.action));
+  $("#modalBackdrop").addEventListener("click",e=>{if(e.target.id==="modalBackdrop")closeModal()});
+}
+function closeModal(){$("#modalRoot").innerHTML=""}
+
+window.toggleReceived=toggleReceived;window.navigate=navigate;window.viewReservation=viewReservation;window.openReservationModal=openReservationModal;window.openMenuModal=openMenuModal;window.openCategoryModal=openCategoryModal;window.toggleMenu=toggleMenu;window.viewOrder=viewOrder;window.openGalleryModal=openGalleryModal;window.toggleGallery=toggleGallery;window.closeModal=closeModal;window.deleteRow=deleteRow;window.deleteCategory=deleteCategory;window.moveCategory=moveCategory;
+
+document.addEventListener("DOMContentLoaded",init);
