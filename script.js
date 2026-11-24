@@ -659,6 +659,41 @@ async function initFavorites() {
     </a>`).join("");
 }
 
+/* ---------- Image viewer (tap a menu photo to enlarge) ---------- */
+function openImageViewer(img) {
+  if (!img) return;
+  let viewer = document.getElementById("img-viewer");
+  if (!viewer) {
+    viewer = document.createElement("div");
+    viewer.id = "img-viewer";
+    viewer.className = "img-viewer";
+    viewer.setAttribute("role", "dialog");
+    viewer.setAttribute("aria-modal", "true");
+    viewer.setAttribute("aria-label", "Enlarged photo");
+    viewer.innerHTML = '<button type="button" class="img-viewer-close" aria-label="Close photo">&times;</button><figure><img alt=""><figcaption></figcaption></figure>';
+    document.body.appendChild(viewer);
+    viewer.addEventListener("click", closeImageViewer); // tap anywhere to close
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeImageViewer(); });
+  }
+  viewer._lastFocus = document.activeElement;
+  const big = viewer.querySelector("img");
+  big.src = img.currentSrc || img.src;
+  big.alt = img.alt || "";
+  viewer.querySelector("figcaption").textContent = img.alt || "";
+  viewer.classList.add("is-open");
+  document.body.style.overflow = "hidden";
+  viewer.querySelector(".img-viewer-close").focus();
+}
+
+function closeImageViewer() {
+  const viewer = document.getElementById("img-viewer");
+  if (!viewer || !viewer.classList.contains("is-open")) return;
+  viewer.classList.remove("is-open");
+  viewer.querySelector("img").removeAttribute("src");
+  document.body.style.overflow = "";
+  if (viewer._lastFocus && viewer._lastFocus.focus) viewer._lastFocus.focus();
+}
+
 /* ---------- 10. Footer year ---------- */
 function initFooterYear() {
   const el = document.querySelector("#footer-year");
@@ -687,6 +722,7 @@ function initTasteShowcase() {
   cards.forEach((card) => {
     card.addEventListener("click", (e) => {
       e.preventDefault();
+      if (e.target.closest("figure")) { openImageViewer(card.querySelector("img")); return; }
       const row = document.getElementById(card.getAttribute("href").slice(1));
       if (!row) return;
       row.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
